@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.1.0
+.VERSION 1.1.1
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,7 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
-Version 1.1.0 makes delegated Microsoft Graph device-code sign-in the default for Graph actions, adds the -Online upload shorthand and retains custom delegated and app-only authentication.
+Version 1.1.1 lets an explicit -Action take precedence when -Online is also present. Without -Action, -Online remains the Upload shorthand. Delegated Microsoft Graph device-code sign-in remains the default for Graph actions.
 #>
 
 <#
@@ -38,7 +38,7 @@ Version 1.1.0 makes delegated Microsoft Graph device-code sign-in the default fo
 .PARAMETER HttpTimeoutSec HTTP timeout in seconds. Upload POST requests are not automatically retried.
 .PARAMETER Action        Full (default) | Sync | Export | Inspect | Upload | Discover | Link | ReadAssociation | RemoveAssociation
 .PARAMETER CsvPath       existing *.devicelink.csv (else newest in -WorkFolder, else -Export makes one)
-.PARAMETER Online        shorthand for -Action Upload; interactive Microsoft Graph sign-in is used by default
+.PARAMETER Online        shorthand for Upload when Action is omitted; when Action is supplied, the explicit action takes precedence
 .PARAMETER Version       display the toolkit version without creating logs or performing an action
 .PARAMETER TenantId/ClientId  optional custom Entra tenant and app for delegated sign-in; required for app-only authentication
 .PARAMETER ClientSecret/CertificateThumbprint   app-only Graph credentials (Upload/Sync/Full or online removal)
@@ -99,20 +99,26 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.1.0'
+$DL_SCRIPT_VERSION = '1.1.1'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
+function Resolve-DLRequestedAction {
+    param(
+        [string]$RequestedAction,
+        [bool]$ActionWasExplicit,
+        [bool]$OnlineWasRequested
+    )
+    if (-not $OnlineWasRequested) { return $RequestedAction }
+    if (-not $ActionWasExplicit) { return 'Upload' }
+    return $RequestedAction
+}
 if ($Version) {
     Write-Output "DeviceLink toolkit $DL_SCRIPT_VERSION"
     return
 }
-if ($Online) {
-    if ($PSBoundParameters.ContainsKey('Action') -and $Action -ne 'Upload') {
-        throw '-Online is shorthand for -Action Upload and cannot be combined with another action.'
-    }
-    $Action = 'Upload'
-}
+$Action = Resolve-DLRequestedAction -RequestedAction $Action -ActionWasExplicit $PSBoundParameters.ContainsKey('Action') `
+    -OnlineWasRequested ([bool]$Online)
 # Explicit logs replace Start-Transcript: transcripts can capture credentials in command lines.
 function Add-DLRedaction([string]$Value) {
     if ([string]::IsNullOrEmpty($Value)) { return }
