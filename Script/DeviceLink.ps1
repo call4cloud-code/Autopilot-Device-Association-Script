@@ -1,4 +1,16 @@
-﻿<#
+﻿<#PSScriptInfo
+.VERSION 1.1.0
+.GUID f21910f3-6fff-442b-9d35-5731d01e5af8
+.AUTHOR Rudy Ooms
+.COMPANYNAME Patch My PC
+.COPYRIGHT (c) 2026 Rudy Ooms. All rights reserved.
+.TAGS Windows Autopilot Intune DeviceAssociation DeviceLink
+.PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
+.RELEASENOTES
+Version 1.1.0 makes delegated Microsoft Graph device-code sign-in the default for Graph actions, adds the -Online upload shorthand and retains custom delegated and app-only authentication.
+#>
+
+<#
 .SYNOPSIS
     One tool for the whole Autopilot "device link" pipeline:
       Export   - produce the genuine TPM-signed *.devicelink.csv (WinRT DeviceLinkUtilities)
@@ -19,14 +31,18 @@
     application logs, not a raw packet capture. Review them before sharing.
     Full remains the original default. Use -Action Upload to investigate an existing CSV
     without exporting again or attempting local association. Add -Verbose for safe decision,
-    timing and substep details. Invoke-RestMethod's own verbose/debug streams stay disabled so
-    credentials and request bodies are not written to the console. Review logs before sharing.
+    timing and substep details. The underlying web cmdlets' verbose/debug streams stay disabled
+    so credentials and request bodies are not written to the console. Review logs before sharing.
 
 .PARAMETER LogFolder     Parent directory for separate per-run diagnostic folders (default: WorkFolder\Logs).
 .PARAMETER HttpTimeoutSec HTTP timeout in seconds. Upload POST requests are not automatically retried.
 .PARAMETER Action        Full (default) | Sync | Export | Inspect | Upload | Discover | Link | ReadAssociation | RemoveAssociation
 .PARAMETER CsvPath       existing *.devicelink.csv (else newest in -WorkFolder, else -Export makes one)
-.PARAMETER TenantId/ClientId/ClientSecret/CertificateThumbprint   app-only Graph creds (Upload/Sync/Full or online removal)
+.PARAMETER Online        shorthand for -Action Upload; interactive Microsoft Graph sign-in is used by default
+.PARAMETER Version       display the toolkit version without creating logs or performing an action
+.PARAMETER TenantId/ClientId  optional custom Entra tenant and app for delegated sign-in; required for app-only authentication
+.PARAMETER ClientSecret/CertificateThumbprint   app-only Graph credentials (Upload/Sync/Full or online removal)
+.PARAMETER InteractiveLogin  explicitly select delegated device-code sign-in; retained for backward compatibility because this is now the default
 .PARAMETER DevicePreparationPolicyId | PolicyName | FirstPolicy    target APDP policy
 .PARAMETER Verbose       show and save safe substep, decision, timing and HTTP metadata
 .PARAMETER DeleteCloudAssociation  after verified UEFI removal, delete the matching Intune Device Association record
@@ -40,6 +56,8 @@
     .\DeviceLink.ps1 -Action Inspect -CsvPath C:\...\PC1.devicelink.csv
     .\DeviceLink.ps1 -Action Upload -TenantId t -ClientId c -ClientSecret s -CsvPath \\srv\share\PC1.devicelink.csv -PolicyName "apdp test"
     .\DeviceLink.ps1 -Action Upload -TenantId t -ClientId c -ClientSecret s -CsvPath C:\...\PC1.devicelink.csv -FirstPolicy -Verbose
+    .\DeviceLink.ps1 -Online -CsvPath C:\...\PC1.devicelink.csv -PolicyName "apdp test" -Verbose
+    .\DeviceLink.ps1 -Version
     .\DeviceLink.ps1 -Action Discover
 
     # Elevated PowerShell; no network request:
@@ -53,6 +71,9 @@ param(
     [ValidateSet('Full','Sync','Export','Inspect','Upload','Discover','Link','ReadAssociation','RemoveAssociation')]
     [string] $Action = 'Full',
 
+    [switch] $Online,
+    [switch] $Version,
+
     [string] $CsvPath,
     [string] $DeviceLinkBase64,
     [string] $WorkFolder = "$env:ProgramData\DeviceLink",
@@ -65,6 +86,7 @@ param(
     [string] $ClientId,
     [string] $ClientSecret,
     [string] $CertificateThumbprint,
+    [switch] $InteractiveLogin,
 
     [switch] $DeleteCloudAssociation,
     [string] $TenantAssociatedDeviceId,
@@ -77,7 +99,20 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$DL_SCRIPT_VERSION = '1.1.0'
+$DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+$DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
+if ($Version) {
+    Write-Output "DeviceLink toolkit $DL_SCRIPT_VERSION"
+    return
+}
+if ($Online) {
+    if ($PSBoundParameters.ContainsKey('Action') -and $Action -ne 'Upload') {
+        throw '-Online is shorthand for -Action Upload and cannot be combined with another action.'
+    }
+    $Action = 'Upload'
+}
 # Explicit logs replace Start-Transcript: transcripts can capture credentials in command lines.
 function Add-DLRedaction([string]$Value) {
     if ([string]::IsNullOrEmpty($Value)) { return }
@@ -132,6 +167,12 @@ function Get-DLSha256([byte[]]$Bytes) {
     try { return ([BitConverter]::ToString($hash.ComputeHash($Bytes))).Replace('-','').ToLowerInvariant() }
     finally { $hash.Dispose() }
 }
+function Get-DLAuthenticationMethod {
+    if ($CertificateThumbprint) { return 'Certificate' }
+    if ($ClientSecret) { return 'Client secret' }
+    if ($ClientId) { return 'Custom interactive device code' }
+    return 'Default Microsoft Graph Command Line Tools interactive device code when Graph is requested'
+}
 function Initialize-DLLogging {
     $script:DLRunId = [Guid]::NewGuid().ToString()
     $script:DLRequestNumber = 0
@@ -144,8 +185,10 @@ function Initialize-DLLogging {
     $script:DLTextLog = Join-Path $script:DLRunFolder 'DeviceLink.log'
     $script:DLJsonLog = Join-Path $script:DLRunFolder 'events.jsonl'
     foreach ($v in @($ClientSecret,$TenantId,$ClientId,$DeviceLinkBase64,$TenantAssociatedDeviceId)) { Add-DLRedaction $v }
+    Write-Host "DeviceLink toolkit $DL_SCRIPT_VERSION" -ForegroundColor Cyan
     Write-Host "Diagnostic logs: $script:DLRunFolder" -ForegroundColor Cyan
     Write-DLLog 'RunStart' "Action: $Action" ([ordered]@{
+        ScriptVersion = $DL_SCRIPT_VERSION
         PowerShell = $PSVersionTable.PSVersion.ToString()
         Edition = $PSVersionTable.PSEdition
         OS = [Environment]::OSVersion.VersionString
@@ -155,7 +198,7 @@ function Initialize-DLLogging {
         AutomaticHttpRetries = 0
         VerboseEnabled = ($VerbosePreference -ne 'SilentlyContinue')
         InputSource = $(if ($DeviceLinkBase64) {'DeviceLinkBase64 parameter'} elseif ($CsvPath) {'CsvPath parameter'} else {'Action default/discovery'})
-        AuthenticationMethod = $(if ($CertificateThumbprint) {'Certificate'} elseif ($ClientSecret) {'Client secret'} else {'Not supplied'})
+        AuthenticationMethod = Get-DLAuthenticationMethod
         DeleteCloudAssociation = [bool]$DeleteCloudAssociation
         ExplicitAssociationRecordId = [bool]$TenantAssociatedDeviceId
         PolicySelection = $(if ($DevicePreparationPolicyId) {'Policy ID'} elseif ($PolicyName) {'Policy name'} elseif ($FirstPolicy) {'First policy'} else {'Not supplied'})
@@ -342,7 +385,8 @@ function Invoke-DLRestMethod {
         $Body,
         [string]$ContentType,
         [switch]$AuthenticationRequest,
-        [int[]]$AcceptedStatusCodes = @()
+        [int[]]$AcceptedStatusCodes = @(),
+        [switch]$ReturnAcceptedResponseBody
     )
     $script:DLRequestNumber++
     $requestId = [Guid]::NewGuid().ToString()
@@ -400,7 +444,7 @@ function Invoke-DLRestMethod {
             $record.ElapsedMilliseconds = $timer.ElapsedMilliseconds
             $record.Response = [ordered]@{
                 Outcome='AcceptedStatus'; StatusCode=$failure.StatusCode; Headers=$failure.Headers
-                Body=(ConvertTo-DLBodyLog $failure.Body); BodySource=$failure.BodySource
+                Body=(ConvertTo-DLBodyLog $failure.Body -Suppress:$AuthenticationRequest); BodySource=$failure.BodySource
                 ExceptionType=$failure.ExceptionType; Message=(Protect-DLText $_.Exception.Message)
             }
             $artifact = Save-DLHttpRecord $record
@@ -411,7 +455,10 @@ function Invoke-DLRestMethod {
             Write-DLVerboseLog 'HttpAcceptedStatusDetails' "$Operation returned expected status $($failure.StatusCode) after $($timer.ElapsedMilliseconds) ms." @{
                 Sequence=$record.Sequence; ClientRequestId=$requestId; StatusCode=$failure.StatusCode; HttpLog=$artifact
             }
-            return [pscustomobject]@{ DLExpectedHttpStatus=[int]$failure.StatusCode }
+            return [pscustomobject]@{
+                DLExpectedHttpStatus=[int]$failure.StatusCode
+                DLResponseBody=$(if ($ReturnAcceptedResponseBody) {[string]$failure.Body} else {$null})
+            }
         }
         $record.ElapsedMilliseconds = $timer.ElapsedMilliseconds
         $record.Response = [ordered]@{
@@ -731,6 +778,15 @@ function Remove-DLFirmwareAssociation {
 Initialize-DLLogging
 $script:DLRunSucceeded = $false
 try {
+if ($InteractiveLogin -and ($ClientSecret -or $CertificateThumbprint)) {
+    throw '-InteractiveLogin cannot be combined with -ClientSecret or -CertificateThumbprint.'
+}
+if ($InteractiveLogin -and $Action -notin 'Upload','Sync','Full','RemoveAssociation') {
+    throw '-InteractiveLogin is valid only with Upload, Sync, Full, or RemoveAssociation with -DeleteCloudAssociation.'
+}
+if ($InteractiveLogin -and $Action -eq 'RemoveAssociation' -and -not $DeleteCloudAssociation) {
+    throw '-InteractiveLogin has no Graph operation to authorize unless RemoveAssociation also uses -DeleteCloudAssociation.'
+}
 if ($DeleteCloudAssociation -and $Action -ne 'RemoveAssociation') {
     throw '-DeleteCloudAssociation is valid only with -Action RemoveAssociation.'
 }
@@ -911,7 +967,114 @@ function Resolve-Csv {
     }
     return $selected
 }
+function Get-DLDelegatedGraphScopes {
+    @(
+        'DeviceManagementConfiguration.Read.All'
+        'DeviceManagementConfiguration.ReadWrite.All'
+        'DeviceManagementServiceConfig.Read.All'
+        'DeviceManagementServiceConfig.ReadWrite.All'
+    )
+}
+function Get-DLInteractiveGraphToken {
+    if ($ClientSecret -or $CertificateThumbprint) {
+        throw 'Interactive sign-in cannot be combined with -ClientSecret or -CertificateThumbprint.'
+    }
+    if ($ClientId -and -not $TenantId) {
+        throw 'A custom -ClientId for interactive sign-in also requires -TenantId.'
+    }
+    $authClientId = if ($ClientId) { $ClientId } else { $DL_DEFAULT_PUBLIC_CLIENT_ID }
+    $authTenant = if ($TenantId) { $TenantId } else { $DL_DEFAULT_AUTHORITY_TENANT }
+    $clientProfile = if ($ClientId) { 'Custom public-client application' } else { 'Microsoft Graph Command Line Tools public client' }
+    $scopes = @(Get-DLDelegatedGraphScopes)
+    $scopeText = $scopes -join ' '
+    $deviceCodeUri = "https://login.microsoftonline.com/$authTenant/oauth2/v2.0/devicecode"
+    $tokenUri = "https://login.microsoftonline.com/$authTenant/oauth2/v2.0/token"
+    Write-DLLog 'InteractiveAuthenticationStart' 'Requesting a Microsoft device-code sign-in prompt.' @{
+        Flow='OAuth 2.0 device authorization grant'; DelegatedScopes=$scopes; ClientIdLogged=$false; TenantIdLogged=$false
+        ClientProfile=$clientProfile; DefaultPublicClient=(-not [bool]$ClientId)
+        ClientSecretUsed=$false; CertificateUsed=$false; AutomaticHttpRetries=0
+    }
+    $deviceCode = Invoke-DLRestMethod -Operation 'RequestInteractiveDeviceCode' -Method POST -Uri $deviceCodeUri `
+        -Body @{client_id=$authClientId;scope=$scopeText} -ContentType 'application/x-www-form-urlencoded' -AuthenticationRequest
+    if (-not $deviceCode.device_code -or -not $deviceCode.user_code -or -not $deviceCode.verification_uri) {
+        throw 'Microsoft did not return a complete device-code sign-in response.'
+    }
+    Add-DLRedaction ([string]$deviceCode.device_code)
+    Add-DLRedaction ([string]$deviceCode.user_code)
+    Add-DLRedaction ([string]$deviceCode.message)
+    Write-Host "`nMicrosoft Graph sign-in required" -ForegroundColor Cyan
+    Write-Host ([string]$deviceCode.message) -ForegroundColor Yellow
+    Write-Host 'Sign in with an account that has the required Intune RBAC permissions. Waiting for completion...' -ForegroundColor DarkGray
+    Write-DLLog 'InteractiveAuthenticationPrompt' 'Displayed the Microsoft device-login instructions on the console. The user code was not written to the diagnostic log.' @{
+        VerificationHost=([Uri]$deviceCode.verification_uri).Host; UserCodeLogged=$false; DeviceCodeLogged=$false
+        ExpiresInSeconds=[int]$deviceCode.expires_in; PollIntervalSeconds=[int]$deviceCode.interval
+    }
+    $interval = [Math]::Max(1,[int]$deviceCode.interval)
+    $deadline = [DateTime]::UtcNow.AddSeconds([int]$deviceCode.expires_in)
+    $attempt = 0
+    do {
+        Start-Sleep -Seconds $interval
+        $attempt++
+        $poll = Invoke-DLRestMethod -Operation 'PollInteractiveGraphToken' -Method POST -Uri $tokenUri `
+            -Body @{grant_type='urn:ietf:params:oauth:grant-type:device_code';client_id=$authClientId;device_code=$deviceCode.device_code} `
+            -ContentType 'application/x-www-form-urlencoded' -AuthenticationRequest -AcceptedStatusCodes 400 -ReturnAcceptedResponseBody
+        if ($poll.access_token) {
+            Add-DLRedaction ([string]$poll.access_token)
+            $grantedScopes = @(([string]$poll.scope -split '\s+') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            $missingScopes = if ($grantedScopes.Count) { @($scopes | Where-Object { $_ -notin $grantedScopes }) } else { @() }
+            if ($missingScopes.Count) {
+                Write-DLLog 'InteractiveAuthenticationScopeCheck' 'The delegated token response omitted one or more requested Graph scopes.' @{
+                    ScopeMetadataReturned=$true; GrantedScopes=$grantedScopes; MissingScopes=$missingScopes
+                } 'ERROR'
+                throw ('Microsoft authenticated the user but the delegated token response omitted required Graph scopes: ' + ($missingScopes -join ', '))
+            }
+            Write-DLLog 'InteractiveAuthenticationScopeCheck' 'Checked the delegated scopes returned with the token response.' @{
+                ScopeMetadataReturned=[bool]$grantedScopes.Count; GrantedScopes=$grantedScopes; MissingScopes=$missingScopes
+            }
+            Write-DLLog 'InteractiveAuthenticationComplete' 'Microsoft returned a delegated Graph access token for this process.' @{
+                Attempts=$attempt; DelegatedScopesRequested=$scopes; AccessTokenLogged=$false; RefreshTokenRequested=$false
+            }
+            return [string]$poll.access_token
+        }
+        $oauthError = $null
+        if ($poll.DLExpectedHttpStatus -eq 400 -and $poll.DLResponseBody) {
+            try { $oauthError = ([string]$poll.DLResponseBody | ConvertFrom-Json).error } catch {}
+        }
+        switch ([string]$oauthError) {
+            'authorization_pending' {
+                Write-DLVerboseLog 'InteractiveAuthenticationPending' "Waiting for interactive sign-in (poll $attempt)." @{Attempt=$attempt;NextPollSeconds=$interval}
+                continue
+            }
+            'slow_down' {
+                $interval += 5
+                Write-DLVerboseLog 'InteractiveAuthenticationSlowDown' 'Microsoft asked the client to reduce the token polling rate.' @{Attempt=$attempt;NextPollSeconds=$interval}
+                continue
+            }
+            'authorization_declined' { throw 'The interactive Microsoft Graph sign-in was declined.' }
+            'expired_token' { throw 'The Microsoft device-login code expired before sign-in completed.' }
+            'bad_verification_code' { throw 'Microsoft rejected the device-login code.' }
+            'access_denied' { throw 'The signed-in account or tenant denied the requested Microsoft Graph delegated permissions.' }
+            default {
+                if ($poll.DLExpectedHttpStatus -eq 400) { throw "Interactive Microsoft Graph sign-in failed with OAuth error '$oauthError'." }
+            }
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'The Microsoft device-login prompt expired before sign-in completed.'
+}
 function Get-GraphToken {
+    if (-not $ClientSecret -and -not $CertificateThumbprint) {
+        Write-DLVerboseLog 'AuthenticationSelection' 'Using delegated Microsoft Graph device-code sign-in because no app-only credential was supplied.' @{
+            Method=$(if ($ClientId) {'Custom public client'} else {'Microsoft Graph Command Line Tools public client'})
+            TenantSelection=$(if ($TenantId) {'Explicit tenant'} else {'Organizations account chosen during sign-in'})
+        }
+        return (Get-DLInteractiveGraphToken)
+    }
+    if ($ClientSecret -and $CertificateThumbprint) {
+        throw 'Choose either -ClientSecret or -CertificateThumbprint for app-only authentication, not both.'
+    }
+    if (-not $TenantId -or -not $ClientId) {
+        throw 'App-only Microsoft Graph authentication requires -TenantId and -ClientId together with the secret or certificate.'
+    }
     $uri = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
     if ($CertificateThumbprint) {
         Write-DLVerboseLog 'AuthenticationSelection' 'Using certificate-based client credentials for Microsoft Graph.' @{ Method='Certificate'; CertificateValueLogged=$false }
@@ -931,7 +1094,7 @@ function Get-GraphToken {
     } elseif ($ClientSecret) {
         Write-DLVerboseLog 'AuthenticationSelection' 'Using client-secret credentials for Microsoft Graph.' @{ Method='Client secret'; SecretLogged=$false }
         $body=@{client_id=$ClientId;scope='https://graph.microsoft.com/.default';grant_type='client_credentials';client_secret=$ClientSecret}
-    } else { throw "This Graph action needs -ClientSecret or -CertificateThumbprint." }
+    } else { throw 'No Microsoft Graph authentication method was selected.' }
     (Invoke-DLRestMethod -Operation 'AcquireGraphToken' -Method POST -Uri $uri -Body $body -ContentType 'application/x-www-form-urlencoded' -AuthenticationRequest).access_token
 }
 function Invoke-Inspect([string]$path) {
@@ -977,11 +1140,23 @@ function Invoke-Inspect([string]$path) {
 }
 function Graph-Headers {
     if (-not $script:GH) {
-        if (-not $TenantId -or -not $ClientId) { throw "Graph needs -TenantId and -ClientId." }
-        Write-DLVerboseLog 'GraphHeaderCache' 'No cached Graph authorization header exists for this run; acquiring a token now.' @{ Cached=$false }
+        if ($InteractiveLogin -and ($ClientSecret -or $CertificateThumbprint)) {
+            throw '-InteractiveLogin cannot be combined with -ClientSecret or -CertificateThumbprint.'
+        }
+        if ($ClientSecret -and $CertificateThumbprint) {
+            throw 'Choose either -ClientSecret or -CertificateThumbprint, not both.'
+        }
+        if (($ClientSecret -or $CertificateThumbprint) -and (-not $TenantId -or -not $ClientId)) {
+            throw 'App-only Microsoft Graph authentication requires -TenantId and -ClientId.'
+        }
+        if (-not $ClientSecret -and -not $CertificateThumbprint -and $ClientId -and -not $TenantId) {
+            throw 'A custom -ClientId for interactive sign-in also requires -TenantId.'
+        }
+        $authMode = Get-DLAuthenticationMethod
+        Write-DLVerboseLog 'GraphHeaderCache' 'No cached Graph authorization header exists for this run; acquiring a token now.' @{ Cached=$false; AuthenticationMode=$authMode }
         $script:GH = @{ Authorization = "Bearer $(Get-GraphToken)" }
         Write-Host "Got Graph token." -ForegroundColor DarkGray
-        Write-DLVerboseLog 'GraphHeaderCache' 'Stored the Graph authorization header in memory for this run.' @{ Cached=$true; TokenLogged=$false }
+        Write-DLVerboseLog 'GraphHeaderCache' 'Stored the Graph authorization header in memory for this run.' @{ Cached=$true; TokenLogged=$false; AuthenticationMode=$authMode }
     } else {
         Write-DLVerboseLog 'GraphHeaderCache' 'Reusing the in-memory Graph authorization header for this run.' @{ Cached=$true; TokenLogged=$false }
     }
@@ -1026,11 +1201,14 @@ function Test-DLAssociationRecordMatch($Record,$Identity) {
     [pscustomobject]@{ Matches=($serialMatch -or $uuidMatch); SerialMatch=$serialMatch; SmbiosUuidMatch=$uuidMatch }
 }
 function Assert-DLCloudRemovalParameters {
-    if (-not $TenantId -or -not $ClientId) {
-        throw '-DeleteCloudAssociation requires -TenantId and -ClientId.'
+    if ($ClientSecret -and $CertificateThumbprint) {
+        throw 'Choose either -ClientSecret or -CertificateThumbprint, not both.'
     }
-    if (-not $ClientSecret -and -not $CertificateThumbprint) {
-        throw '-DeleteCloudAssociation requires -ClientSecret or -CertificateThumbprint.'
+    if (($ClientSecret -or $CertificateThumbprint) -and (-not $TenantId -or -not $ClientId)) {
+        throw 'App-only cloud removal requires -TenantId and -ClientId.'
+    }
+    if (-not $ClientSecret -and -not $CertificateThumbprint -and $ClientId -and -not $TenantId) {
+        throw 'A custom -ClientId for interactive cloud removal also requires -TenantId.'
     }
     if ($TenantAssociatedDeviceId) {
         $parsed = [Guid]::Empty
@@ -1152,30 +1330,40 @@ function Wait-DLCloudAssociationDeletion {
     throw "Microsoft Graph accepted the delete, but the association record was not removed or pendingRemoval within $Seconds seconds. The DELETE was not repeated."
 }
 function Wait-PreAssociated([string]$id, [int]$sec) {
+    if ([string]::IsNullOrWhiteSpace($id)) {
+        throw 'The Device Association import did not return a record ID, so its service-side result cannot be verified.'
+    }
+    Add-DLRedaction $id
     $H = Graph-Headers
     $deadline = (Get-Date).AddSeconds($sec)
     Write-DLLog 'AssociationWaitStart' 'Waiting for the imported record.' @{ DeviceRecordId=$id; TimeoutSeconds=$sec }
     $attempt = 0
+    $lastState = $null
     do {
         $attempt++
         $remaining = [Math]::Max(0,[int][Math]::Ceiling(($deadline-(Get-Date)).TotalSeconds))
         Write-DLVerboseLog 'AssociationPollAttempt' "Polling the imported association record (attempt $attempt)." @{ Attempt=$attempt; RemainingSeconds=$remaining; PollIntervalSeconds=5; DeviceRecordId=$id }
         try {
             $d = Invoke-DLRestMethod -Operation 'PollAssociationState' -Headers $H -Uri "$GraphBase/deviceManagement/tenantAssociatedDevices/$id"
-            Write-DLLog 'AssociationState' ([string]$d.associationState) @{ DeviceRecordId=$id }
-            if ($d.associationState -in 'preassociated','associated') {
-                Write-DLVerboseLog 'AssociationWaitComplete' "The imported record reached $($d.associationState) on attempt $attempt." @{ Attempt=$attempt; AssociationState=$d.associationState; DeviceRecordId=$id }
-                return $d.associationState
+            $lastState = [string]$d.associationState
+            Write-Host ("  associationState = {0}" -f $(if ($lastState) {$lastState} else {'<empty>'})) -ForegroundColor DarkGray
+            Write-DLLog 'AssociationState' $lastState @{ DeviceRecordId=$id; Attempt=$attempt; RemainingSeconds=$remaining }
+            if ($lastState -in 'preassociated','associated') {
+                Write-DLVerboseLog 'AssociationWaitComplete' "The imported record reached $lastState on attempt $attempt." @{ Attempt=$attempt; AssociationState=$lastState; DeviceRecordId=$id }
+                return $lastState
             }
         } catch {
             if ($_.Exception.Data['HttpStatusCode'] -ne 404) { throw }
             Write-Host "  not visible yet (404)" -ForegroundColor DarkGray
             Write-DLVerboseLog 'AssociationPollNotFound' 'The imported record is not visible yet; polling will continue.' @{ Attempt=$attempt; HttpStatus=404; DeviceRecordId=$id }
         }
-        Start-Sleep -Seconds 5
+        if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
     } while ((Get-Date) -lt $deadline)
-    Write-DLLog 'AssociationWaitTimeout' 'The imported record did not reach the expected state within the wait period.' @{ DeviceRecordId=$id } 'WARN'
-    return $null
+    $stateText = if ($lastState) {$lastState} else {'not returned'}
+    Write-DLLog 'AssociationWaitTimeout' 'The imported record did not reach preassociated or associated within the wait period.' @{
+        DeviceRecordId=$id; Attempts=$attempt; LastAssociationState=$stateText; TimeoutSeconds=$sec
+    } 'ERROR'
+    throw "Timed out waiting for Device Association to reach preassociated or associated. Last service state: $stateText."
 }
 function Invoke-Upload([string]$b64) {
     Write-DLExportSummary $b64
@@ -1205,6 +1393,14 @@ function Invoke-Upload([string]$b64) {
     Write-DLLog 'UploadStart' 'Submitting the existing DeviceLink data without modifying or re-signing it.' @{ PolicyId=$polId; PayloadCharacters=$payload.Length; RetryPolicy='No automatic retry' }
     $resp = Invoke-DLRestMethod -Operation 'ImportTenantAssociatedDevice' -Method POST -Headers $H -ContentType 'application/json' `
             -Uri "$GraphBase/deviceManagement/tenantAssociatedDevices/importTenantAssociatedDevice" -Body $payload
+    if ($null -eq $resp -or [string]::IsNullOrWhiteSpace([string]$resp.id)) {
+        throw 'Microsoft Graph accepted the import request but did not return a Device Association record ID. The script cannot verify the result; review the HTTP artifact and Intune before retrying.'
+    }
+    Add-DLRedaction ([string]$resp.id)
+    Write-DLLog 'UploadAccepted' 'Microsoft Graph returned a Device Association record that can be polled.' @{
+        RecordIdSha256=(Get-DLIdentifierHash ([string]$resp.id)); InitialAssociationState=[string]$resp.associationState
+        RecordIdLogged=$false; AutomaticPostRetries=0
+    }
     Write-Host "Imported." -ForegroundColor Green
     $resp | Select-Object id,serialNumber,manufacturerName,modelName,associationState,devicePreparationPolicyId,preassociationDateTime | Format-List | Out-Host
     $resp
@@ -1346,7 +1542,8 @@ switch ($Action) {
           return (Get-BlobFromCsv $p)
       }
       $r = Invoke-DLStep 2 { Invoke-Upload $blob }
-      Invoke-DLStep 3 { Wait-PreAssociated $r.id $TimeoutSec | Out-Null } | Out-Null
+      $state = Invoke-DLStep 3 { Wait-PreAssociated $r.id $TimeoutSec }
+      Write-Host "Pre-associated ($state)." -ForegroundColor Green
   }
 
   'Sync' {
@@ -1354,7 +1551,8 @@ switch ($Action) {
       Write-Host "Exported: $csv" -ForegroundColor Green
       $blob = Invoke-DLStep 2 { Get-BlobFromCsv $csv }
       $r = Invoke-DLStep 3 { Invoke-Upload $blob }
-      Invoke-DLStep 4 { Wait-PreAssociated $r.id $TimeoutSec | Out-Null } | Out-Null
+      $state = Invoke-DLStep 4 { Wait-PreAssociated $r.id $TimeoutSec }
+      Write-Host "Pre-associated ($state)." -ForegroundColor Green
   }
 
   'Discover' {
@@ -1392,7 +1590,6 @@ switch ($Action) {
       }
       $r = Invoke-DLStep 3 { Invoke-Upload $b }
       $state = Invoke-DLStep 4 { Wait-PreAssociated $r.id $TimeoutSec }
-      if (-not $state) { throw "Timed out waiting for pre-association of $($r.id)." }
       Write-Host "Pre-associated ($state)." -ForegroundColor Green
       Write-Host "`nLinking device ..." -ForegroundColor Cyan
       Invoke-DLStep 5 { Show-LinkResult (Invoke-DLLink $b $false) $false }
