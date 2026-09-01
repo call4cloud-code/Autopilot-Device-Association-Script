@@ -1,13 +1,14 @@
 ﻿<#PSScriptInfo
-.VERSION 1.1.1
+.VERSION 1.3.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
 .COPYRIGHT (c) 2026 Rudy Ooms. All rights reserved.
-.TAGS Windows Autopilot Intune DeviceAssociation DeviceLink
+.TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
-Version 1.1.1 lets an explicit -Action take precedence when -Online is also present. Without -Action, -Online remains the Upload shorthand. Delegated Microsoft Graph device-code sign-in remains the default for Graph actions.
+Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
+Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
 #>
 
 <#
@@ -23,7 +24,24 @@ Version 1.1.1 lets an explicit -Action take precedence when -Online is also pres
       Sync     - Export + Upload + wait until preassociated
       Full     - Export + Inspect + Upload + wait until preassociated + Link
 
-.NOTE
+.DESCRIPTION
+    Get-AutopilotDeviceAssociation is a PowerShell toolkit for the whole Windows Autopilot
+    device association lifecycle. It exports the genuine TPM-backed DeviceLink identity
+    package that Windows produces (WinRT DeviceLinkUtilities), inspects that package and
+    recovers the real RSA-PSS salt length, imports the unchanged Data value into Intune
+    through the Microsoft Graph beta importTenantAssociatedDevice endpoint, polls the record
+    until it is pre-associated, runs native Windows discovery and link calls, reads the local
+    Device Link UEFI markers by hash and status only, and removes the association locally and
+    - with an explicit switch - in Intune after verified local removal.
+
+    The exported Data value is uploaded exactly as Windows produced it; the script does not
+    fabricate, alter or re-sign identities, and HTTP mutations have zero automatic retries.
+    It supports interactive device-code sign-in by default and certificate or client-secret
+    app-only authentication for unattended runs. This is a diagnostic and lab toolkit that
+    calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change;
+    test it before using it in an operational workflow.
+
+.NOTES
     Native association is intended for the Device Association OOBE flow. A missing maaJwt
     response indicates missing attestation material; HRESULT 0x8103C00F alone does not prove
     its cause. This logger captures this script's REST calls, not Windows' internal traffic.
@@ -43,28 +61,28 @@ Version 1.1.1 lets an explicit -Action take precedence when -Online is also pres
 .PARAMETER TenantId/ClientId  optional custom Entra tenant and app for delegated sign-in; required for app-only authentication
 .PARAMETER ClientSecret/CertificateThumbprint   app-only Graph credentials (Upload/Sync/Full or online removal)
 .PARAMETER InteractiveLogin  explicitly select delegated device-code sign-in; retained for backward compatibility because this is now the default
-.PARAMETER DevicePreparationPolicyId | PolicyName | FirstPolicy    target APDP policy
-.PARAMETER Verbose       show and save safe substep, decision, timing and HTTP metadata
+.PARAMETER DevicePreparationPolicyId | PolicyName | FirstPolicy    target APDP policy; the first returned policy is the default
+.PARAMETER Verbose       add safe substep, decision, timing and HTTP metadata to the console; diagnostic files are always written
 .PARAMETER DeleteCloudAssociation  after verified UEFI removal, delete the matching Intune Device Association record
 .PARAMETER TenantAssociatedDeviceId optional exact Intune Device Association record ID; it must still match this computer
 
-.EXAMPLES
+.EXAMPLE
     # device, fully unattended (elevated / SYSTEM):
-    .\DeviceLink.ps1 -Action Full -TenantId t -ClientId c -CertificateThumbprint th -FirstPolicy
+    .\Get-AutopilotDeviceAssociation.ps1 -Action Full -TenantId t -ClientId c -CertificateThumbprint th
 
-    .\DeviceLink.ps1 -Action Export
-    .\DeviceLink.ps1 -Action Inspect -CsvPath C:\...\PC1.devicelink.csv
-    .\DeviceLink.ps1 -Action Upload -TenantId t -ClientId c -ClientSecret s -CsvPath \\srv\share\PC1.devicelink.csv -PolicyName "apdp test"
-    .\DeviceLink.ps1 -Action Upload -TenantId t -ClientId c -ClientSecret s -CsvPath C:\...\PC1.devicelink.csv -FirstPolicy -Verbose
-    .\DeviceLink.ps1 -Online -CsvPath C:\...\PC1.devicelink.csv -PolicyName "apdp test" -Verbose
-    .\DeviceLink.ps1 -Version
-    .\DeviceLink.ps1 -Action Discover
+    .\Get-AutopilotDeviceAssociation.ps1 -Action Export
+    .\Get-AutopilotDeviceAssociation.ps1 -Action Inspect -CsvPath C:\...\PC1.devicelink.csv
+    .\Get-AutopilotDeviceAssociation.ps1 -Action Upload -TenantId t -ClientId c -ClientSecret s -CsvPath \\srv\share\PC1.devicelink.csv -PolicyName "apdp test"
+    .\Get-AutopilotDeviceAssociation.ps1 -Action Upload -TenantId t -ClientId c -ClientSecret s -CsvPath C:\...\PC1.devicelink.csv -Verbose
+    .\Get-AutopilotDeviceAssociation.ps1 -Online -CsvPath C:\...\PC1.devicelink.csv -PolicyName "apdp test" -Verbose
+    .\Get-AutopilotDeviceAssociation.ps1 -Version
+    .\Get-AutopilotDeviceAssociation.ps1 -Action Discover
 
     # Elevated PowerShell; no network request:
-    .\DeviceLink.ps1 -Action ReadAssociation
-    .\DeviceLink.ps1 -Action RemoveAssociation
-    .\DeviceLink.ps1 -Action RemoveAssociation -WhatIf
-    .\DeviceLink.ps1 -Action RemoveAssociation -DeleteCloudAssociation -TenantId t -ClientId c -CertificateThumbprint th -Verbose
+    .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation
+    .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation
+    .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation -WhatIf
+    .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation -DeleteCloudAssociation -TenantId t -ClientId c -CertificateThumbprint th -Verbose
 #>
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
 param(
@@ -99,7 +117,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.1.1'
+$DL_SCRIPT_VERSION = '1.3.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -192,7 +210,9 @@ function Initialize-DLLogging {
     $script:DLJsonLog = Join-Path $script:DLRunFolder 'events.jsonl'
     foreach ($v in @($ClientSecret,$TenantId,$ClientId,$DeviceLinkBase64,$TenantAssociatedDeviceId)) { Add-DLRedaction $v }
     Write-Host "DeviceLink toolkit $DL_SCRIPT_VERSION" -ForegroundColor Cyan
-    Write-Host "Diagnostic logs: $script:DLRunFolder" -ForegroundColor Cyan
+    if ($VerbosePreference -ne 'SilentlyContinue') {
+        Write-Host "Diagnostic logs: $script:DLRunFolder" -ForegroundColor DarkGray
+    }
     Write-DLLog 'RunStart' "Action: $Action" ([ordered]@{
         ScriptVersion = $DL_SCRIPT_VERSION
         PowerShell = $PSVersionTable.PSVersion.ToString()
@@ -207,7 +227,7 @@ function Initialize-DLLogging {
         AuthenticationMethod = Get-DLAuthenticationMethod
         DeleteCloudAssociation = [bool]$DeleteCloudAssociation
         ExplicitAssociationRecordId = [bool]$TenantAssociatedDeviceId
-        PolicySelection = $(if ($DevicePreparationPolicyId) {'Policy ID'} elseif ($PolicyName) {'Policy name'} elseif ($FirstPolicy) {'First policy'} else {'Not supplied'})
+        PolicySelection = $(if ($DevicePreparationPolicyId) {'Policy ID'} elseif ($PolicyName) {'Policy name'} elseif ($FirstPolicy) {'First policy (explicit)'} else {'First policy (default)'})
         ScriptSha256 = $(if ($PSCommandPath) { Get-DLSha256 ([IO.File]::ReadAllBytes($PSCommandPath)) } else { $null })
     })
 }
@@ -222,7 +242,11 @@ function Write-DLLog {
     }
     $line = '[{0}] [{1}] {2}: {3}' -f $stamp,$Level,$Event,$safeMessage
     if (-not $NoHost) {
-        Write-Host $line -ForegroundColor $(if ($Level -eq 'ERROR') {'Red'} elseif ($Level -eq 'WARN') {'Yellow'} else {'DarkGray'})
+        if ($VerbosePreference -ne 'SilentlyContinue') {
+            Write-Host $line -ForegroundColor $(if ($Level -eq 'ERROR') {'Red'} elseif ($Level -eq 'WARN') {'Yellow'} else {'DarkGray'})
+        } elseif ($Level -eq 'WARN' -or ($Level -eq 'ERROR' -and $Event -in 'RunFailed','AssociationNotConfirmed')) {
+            Write-Host ("{0}: {1}" -f $Level,$safeMessage) -ForegroundColor $(if ($Level -eq 'ERROR') {'Red'} else {'Yellow'})
+        }
     }
     try {
         $entry = [ordered]@{ TimestampUtc=$stamp; RunId=$script:DLRunId; Level=$Level; Event=$Event; Message=$safeMessage }
@@ -1008,9 +1032,9 @@ function Get-DLInteractiveGraphToken {
     Add-DLRedaction ([string]$deviceCode.device_code)
     Add-DLRedaction ([string]$deviceCode.user_code)
     Add-DLRedaction ([string]$deviceCode.message)
-    Write-Host "`nMicrosoft Graph sign-in required" -ForegroundColor Cyan
+    Write-Host "`nMicrosoft Graph sign-in" -ForegroundColor Cyan
     Write-Host ([string]$deviceCode.message) -ForegroundColor Yellow
-    Write-Host 'Sign in with an account that has the required Intune RBAC permissions. Waiting for completion...' -ForegroundColor DarkGray
+    Write-Host "`nWaiting for sign-in..." -ForegroundColor DarkGray
     Write-DLLog 'InteractiveAuthenticationPrompt' 'Displayed the Microsoft device-login instructions on the console. The user code was not written to the diagnostic log.' @{
         VerificationHost=([Uri]$deviceCode.verification_uri).Host; UserCodeLogged=$false; DeviceCodeLogged=$false
         ExpiresInSeconds=[int]$deviceCode.expires_in; PollIntervalSeconds=[int]$deviceCode.interval
@@ -1161,7 +1185,7 @@ function Graph-Headers {
         $authMode = Get-DLAuthenticationMethod
         Write-DLVerboseLog 'GraphHeaderCache' 'No cached Graph authorization header exists for this run; acquiring a token now.' @{ Cached=$false; AuthenticationMode=$authMode }
         $script:GH = @{ Authorization = "Bearer $(Get-GraphToken)" }
-        Write-Host "Got Graph token." -ForegroundColor DarkGray
+        Write-Host "Microsoft Graph authentication completed." -ForegroundColor Green
         Write-DLVerboseLog 'GraphHeaderCache' 'Stored the Graph authorization header in memory for this run.' @{ Cached=$true; TokenLogged=$false; AuthenticationMode=$authMode }
     } else {
         Write-DLVerboseLog 'GraphHeaderCache' 'Reusing the in-memory Graph authorization header for this run.' @{ Cached=$true; TokenLogged=$false }
@@ -1342,6 +1366,7 @@ function Wait-PreAssociated([string]$id, [int]$sec) {
     Add-DLRedaction $id
     $H = Graph-Headers
     $deadline = (Get-Date).AddSeconds($sec)
+    Write-Host 'Waiting for Intune to report the device as pre-associated...' -ForegroundColor DarkGray
     Write-DLLog 'AssociationWaitStart' 'Waiting for the imported record.' @{ DeviceRecordId=$id; TimeoutSeconds=$sec }
     $attempt = 0
     $lastState = $null
@@ -1352,7 +1377,6 @@ function Wait-PreAssociated([string]$id, [int]$sec) {
         try {
             $d = Invoke-DLRestMethod -Operation 'PollAssociationState' -Headers $H -Uri "$GraphBase/deviceManagement/tenantAssociatedDevices/$id"
             $lastState = [string]$d.associationState
-            Write-Host ("  associationState = {0}" -f $(if ($lastState) {$lastState} else {'<empty>'})) -ForegroundColor DarkGray
             Write-DLLog 'AssociationState' $lastState @{ DeviceRecordId=$id; Attempt=$attempt; RemainingSeconds=$remaining }
             if ($lastState -in 'preassociated','associated') {
                 Write-DLVerboseLog 'AssociationWaitComplete' "The imported record reached $lastState on attempt $attempt." @{ Attempt=$attempt; AssociationState=$lastState; DeviceRecordId=$id }
@@ -1360,7 +1384,6 @@ function Wait-PreAssociated([string]$id, [int]$sec) {
             }
         } catch {
             if ($_.Exception.Data['HttpStatusCode'] -ne 404) { throw }
-            Write-Host "  not visible yet (404)" -ForegroundColor DarkGray
             Write-DLVerboseLog 'AssociationPollNotFound' 'The imported record is not visible yet; polling will continue.' @{ Attempt=$attempt; HttpStatus=404; DeviceRecordId=$id }
         }
         if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
@@ -1380,18 +1403,22 @@ function Invoke-Upload([string]$b64) {
     $polId = $DevicePreparationPolicyId
     if (-not $polId) {
         Write-DLVerboseLog 'PolicySelection' 'No policy ID was supplied; listing Device Preparation policies for selection.' @{
-            SelectionMode=$(if ($PolicyName) {'Exact name'} elseif ($FirstPolicy) {'First returned policy'} else {'Caller must choose'})
+            SelectionMode=$(if ($PolicyName) {'Exact name'} elseif ($FirstPolicy) {'First returned policy (explicit)'} else {'First returned policy (default)'})
         }
         $f = "(technologies has 'enrollment') and (platforms eq 'windows10') and (TemplateReference/templateId eq '$APDP_TEMPLATE_ID') and (Templatereference/templateFamily eq 'enrollmentConfiguration')"
         $pols = (Invoke-DLRestMethod -Operation 'ListDevicePreparationPolicies' -Headers $H -Uri ("$GraphBase/deviceManagement/configurationPolicies?`$select=id,name&`$filter=" + [uri]::EscapeDataString($f))).value
         if (-not $pols) { throw "No Autopilot device preparation policies in this tenant." }
         Write-DLVerboseLog 'PolicyListResult' "Microsoft Graph returned $(@($pols).Count) Device Preparation policy/policies." @{ Count=@($pols).Count }
         $sel = if ($PolicyName) { $pols | Where-Object name -eq $PolicyName | Select-Object -First 1 }
-               elseif ($FirstPolicy) { $pols | Select-Object -First 1 }
-        if (-not $sel) { Write-Host "APDP policies:" -ForegroundColor Yellow; $pols | ForEach-Object { "  {0}  {1}" -f $_.id,$_.name }; throw "Pick with -DevicePreparationPolicyId / -PolicyName / -FirstPolicy." }
+               else { $pols | Select-Object -First 1 }
+        if (-not $sel) {
+            $availableNames = @($pols | ForEach-Object { [string]$_.name }) -join ', '
+            Write-DLVerboseLog 'PolicySelectionFailed' 'The requested policy name was not returned by Microsoft Graph.' @{ RequestedName=$PolicyName; AvailablePolicies=$pols }
+            throw "No Device Preparation policy named '$PolicyName' was found. Available policies: $availableNames"
+        }
         $polId = $sel.id
-        Write-Host ("Policy: {0}  ({1})" -f $sel.name,$sel.id) -ForegroundColor DarkGray
-        Write-DLVerboseLog 'PolicySelected' 'Selected a Device Preparation policy for the import.' @{ SelectionMode=$(if ($PolicyName) {'Exact name'} else {'First returned policy'}); PolicyId=$polId; PolicyName=$sel.name }
+        Write-Host ("Device Preparation policy: {0}" -f $sel.name) -ForegroundColor DarkGray
+        Write-DLVerboseLog 'PolicySelected' 'Selected a Device Preparation policy for the import.' @{ SelectionMode=$(if ($PolicyName) {'Exact name'} elseif ($FirstPolicy) {'First returned policy (explicit)'} else {'First returned policy (default)'}); PolicyId=$polId; PolicyName=$sel.name }
     } else {
         Write-DLVerboseLog 'PolicySelected' 'Using the Device Preparation policy ID supplied by the caller.' @{ SelectionMode='Policy ID parameter'; PolicyId=$polId }
     }
@@ -1407,8 +1434,10 @@ function Invoke-Upload([string]$b64) {
         RecordIdSha256=(Get-DLIdentifierHash ([string]$resp.id)); InitialAssociationState=[string]$resp.associationState
         RecordIdLogged=$false; AutomaticPostRetries=0
     }
-    Write-Host "Imported." -ForegroundColor Green
-    $resp | Select-Object id,serialNumber,manufacturerName,modelName,associationState,devicePreparationPolicyId,preassociationDateTime | Format-List | Out-Host
+    Write-Host "Device Association import accepted." -ForegroundColor Green
+    if ($VerbosePreference -ne 'SilentlyContinue') {
+        $resp | Select-Object id,serialNumber,manufacturerName,modelName,associationState,devicePreparationPolicyId,preassociationDateTime | Format-List | Out-Host
+    }
     $resp
 }
 function Show-LinkResult([string]$raw, [bool]$discoverOnly) {
@@ -1426,16 +1455,21 @@ function Show-LinkResult([string]$raw, [bool]$discoverOnly) {
         ConfigureResult=$cr; ConfigureResultText=$crText; ConfigureHResult=$kv.configureHResult
         DiscoveryUrlLogged=$false; TenantIdLogged=$false
     }
-    [pscustomobject]@{
+    $summary = [pscustomobject]@{
         AlreadyLinked    = ($kv.alreadyLinked -eq '1')
         DiscoveryResult  = "$dr ($($discoveryResultNames[$dr]))"
         DiscoveryUrl     = $kv.discoveryUrl
         TenantId         = $kv.tenantId
         ConfigureResult  = if ($discoverOnly) { '(skipped)' } else { $crText }
         ConfigureHResult = $kv.configureHResult
-    } | Format-List
-    if ($discoverOnly) { return }
+    }
+    if ($VerbosePreference -ne 'SilentlyContinue') { $summary | Format-List | Out-Host }
+    if ($discoverOnly) {
+        Write-Host ("Discovery result: {0}" -f $summary.DiscoveryResult) -ForegroundColor $(if ($dr -in 1,2) {'Green'} else {'Yellow'})
+        return
+    }
     if ($cr -eq 1 -and $hrOk) {
+        Write-Host 'Device association applied successfully.' -ForegroundColor Green
         Write-DLLog 'AssociationCompleted' 'The native operation reports SuccessfullyAppliedLink. Enrollment is a later operation.' @{ Result=$cr; HResult=$kv.configureHResult }
     } else {
         Write-DLLog 'AssociationNotConfirmed' 'No successful association result was returned. An HRESULT of zero alone does not establish association success.' @{ Result=$cr; ResultText=$crText; HResult=$kv.configureHResult } 'ERROR'
