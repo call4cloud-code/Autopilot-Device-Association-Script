@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.3.0**
+**Current version: 1.4.0**
 
 It brings the device-side and Intune-side parts of the lab workflow into one script. You can use it to export the genuine TPM-backed DeviceLink identity package produced by Windows, import that package into Intune, follow the association to the device, inspect its local UEFI markers and collect redacted evidence when something fails.
 
@@ -301,6 +301,16 @@ After Graph accepts the POST, the script requires a returned association-record 
 .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Verbose
 ```
 
+### Check whether the association token is valid
+
+```powershell
+# offline: structure, iat/exp window, linkId, tenant and device-binding claims
+.\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -TenantId '<tenant-guid>' -Verbose
+
+# online: the above plus RS256 signature verification against the issuer's published key
+.\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -Online -TenantId '<tenant-guid>' -Verbose
+```
+
 ### Preview local removal
 
 ```powershell
@@ -347,6 +357,8 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `Link` | 2 | Native Windows DeviceLink traffic | Discovers and applies the association. |
 | `Full` | 5 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers and applies. |
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
+| `ReadAssociation -Validate` | 2 | No (offline) | No; also decodes and checks the `DeviceLinkJwtCompressed` token. |
+| `ReadAssociation -Validate -Online` | 2 | Issuer metadata / JWKS (anonymous) | No; adds RS256 signature verification of the token. |
 | `RemoveAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
 | `RemoveAssociation -DeleteCloudAssociation` | 4 | Microsoft identity and Graph | Resolves the cloud record, removes UEFI, sends one Graph DELETE and verifies the cloud result. |
 
@@ -376,6 +388,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-FirstPolicy` | Explicitly selects the first applicable policy returned by Graph. Retained for compatibility because this is now the default. | Disabled |
 | `-DeleteCloudAssociation` | After verified local removal, deletes the matched Intune Device Association record. Valid only with `RemoveAssociation`. | Disabled |
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
+| `-Validate` | With `ReadAssociation`: decode `DeviceLinkJwtCompressed` and check it is a well-formed RS256 JWT, inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and (with `-TenantId`) a matching tenant and device inventory. Add `-Online` to also verify the RS256 signature against the issuer's published key. Reports booleans, timestamps and the signing-key thumbprint only. | Disabled |
 | `-GraphBase` | Microsoft Graph base URL. Mainly useful for testing. | `https://graph.microsoft.com/beta` |
 | `-Verbose` | Adds timestamped diagnostic events, policy-selection details, polling states, HTTP progress and technical result fields to the console. | Disabled |
 | `-WhatIf` | Previews guarded removal operations. Online preview still performs authentication and read-only matching. | Disabled |
@@ -435,6 +448,22 @@ DeviceLinkUtc
 - The Win32 result.
 
 The raw UEFI contents are never returned by this action or written to its logs.
+
+### Validating the association token
+
+`ReadAssociation -Validate` adds a second step that decodes `DeviceLinkJwtCompressed` and reports whether the association token is still valid. It decompresses the value (raw / DEFLATE / GZip), splits the JWT and checks:
+
+| Check | Offline | Needs `-Online` |
+|---|---|---|
+| Decompresses to a 3-part `RS256` JWT | yes | |
+| Inside its `iat` / `nbf` / `exp` window (300 s skew); reports days remaining | yes | |
+| `linkId` claim equals the `DeviceLinkId` UEFI variable | yes | |
+| `tenantId` claim equals `-TenantId` | yes (when `-TenantId` supplied) | |
+| `deviceSerialNumber` / `deviceManufacturer` / `deviceModel` claims equal local WMI | yes | |
+| Issuer host is a Microsoft domain | yes | |
+| **RS256 signature verifies against the issuer's published key** | | **yes** |
+
+With `-Online` the script resolves the signing key from the issuer's OpenID metadata / JWKS (an anonymous request; no Graph token) and verifies the signature. The output is a `Verdict` of `VALID`, `VALID (signature not checked)` (offline), `INDETERMINATE (signature not verified)` (online but keys not located) or `INVALID` with the failed checks listed. Only booleans, timestamps and the signing-key thumbprint are printed or logged; the token and the claim values are not.
 
 Local removal follows a guarded sequence:
 
@@ -641,12 +670,20 @@ The packaged build has been checked with Windows PowerShell 5.1 and PowerShell 7
 - Import record-ID validation, record-ID redaction and terminating pre-association timeouts.
 - Read-only inspection of a real CSV without modifying its bytes.
 - Offline `RemoveAssociation -WhatIf` without firmware reads or writes.
+- `ReadAssociation -Validate` token decode, `iat`/`exp` lifetime maths, `linkId`/claim binding and RS256 signature verification against a substitute key, with the token and claim values redacted.
 
 No real Graph mutation, UEFI deletion, TPM change, Intune deletion or Entra deletion was performed by the automated validation. See [`Verification.json`](./Verification.json) and [`manifest.json`](./manifest.json) for the packaged evidence and hashes.
 
 The package also contains exact pre-change script snapshots for comparison and rollback.
 
 ## Version history
+
+### 1.4.0
+
+- Added `-Action ReadAssociation -Validate`: decompresses `DeviceLinkJwtCompressed`, then checks the token is a well-formed RS256 JWT, inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and (with `-TenantId`) a matching tenant and device inventory.
+- `-Validate -Online` resolves the issuer's published signing key from OpenID metadata / JWKS and verifies the RS256 signature. The lookup is anonymous; no Graph token is used.
+- The validation step prints and logs only booleans, timestamps and the signing-key thumbprint. The token and claim values are added to the redaction set.
+- No change to any other action.
 
 ### 1.3.0
 

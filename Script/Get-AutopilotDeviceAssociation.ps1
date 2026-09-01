@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.3.0
+.VERSION 1.4.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged.
 Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
 Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
 #>
@@ -19,7 +20,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
       Upload   - pre-associate the device in Intune via Graph (importTenantAssociatedDevice)
       Discover - RequestDiscoveryUrlAsync (health check: is the pre-association live?)
       Link     - Discover + ConfigureDeviceLinkAsync (the OOBE "Next" button; see note)
-      ReadAssociation   - read hashes/status of known Device Link UEFI variables
+      ReadAssociation   - read hashes/status of known Device Link UEFI variables; add -Validate to check the DeviceLinkJwtCompressed token (offline), or -Validate -Online to also verify its signature
       RemoveAssociation - delete and verify the Device Link association variables; optionally delete the Intune association record
       Sync     - Export + Upload + wait until preassociated
       Full     - Export + Inspect + Upload + wait until preassociated + Link
@@ -65,6 +66,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 .PARAMETER Verbose       add safe substep, decision, timing and HTTP metadata to the console; diagnostic files are always written
 .PARAMETER DeleteCloudAssociation  after verified UEFI removal, delete the matching Intune Device Association record
 .PARAMETER TenantAssociatedDeviceId optional exact Intune Device Association record ID; it must still match this computer
+.PARAMETER Validate      with -Action ReadAssociation: decode DeviceLinkJwtCompressed and check it is well-formed, in its iat/exp window, bound to this device and (with -Online) signed by its issuer's published key. Reports booleans and timestamps only; never the token or identity values.
 
 .EXAMPLE
     # device, fully unattended (elevated / SYSTEM):
@@ -80,6 +82,8 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 
     # Elevated PowerShell; no network request:
     .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation
+    .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate
+    .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -Online -TenantId t -Verbose
     .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation
     .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation -WhatIf
     .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation -DeleteCloudAssociation -TenantId t -ClientId c -CertificateThumbprint th -Verbose
@@ -109,6 +113,8 @@ param(
     [switch] $DeleteCloudAssociation,
     [string] $TenantAssociatedDeviceId,
 
+    [switch] $Validate,
+
     [string] $DevicePreparationPolicyId,
     [string] $PolicyName,
     [switch] $FirstPolicy,
@@ -117,7 +123,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.3.0'
+$DL_SCRIPT_VERSION = '1.4.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -268,7 +274,10 @@ function Write-DLVerboseLog {
 }
 function Get-DLActionPlan([string]$SelectedAction) {
     switch ($SelectedAction) {
-        'ReadAssociation'   { @('Read and report the known Device Link UEFI markers') }
+        'ReadAssociation'   {
+            if ($Validate) { @('Read and report the known Device Link UEFI markers','Validate the DeviceLinkJwtCompressed token') }
+            else           { @('Read and report the known Device Link UEFI markers') }
+        }
         'RemoveAssociation' {
             if ($DeleteCloudAssociation) {
                 @(
@@ -760,6 +769,17 @@ function Clear-DLFirmwareVariable([string]$Name) {
     [DLKit4.FirmwareEnvironment]::Delete($Name,$DLFirmwareNamespace)
 }
 
+# Returns the raw bytes of a known Device Link UEFI variable for local validation only.
+# The bytes are never written to the diagnostic log; callers report booleans and hashes.
+function Get-DLFirmwareRawValue([string]$Name) {
+    Initialize-DLFirmwareInterop
+    $native = [DLKit4.FirmwareEnvironment]::Read($Name,$DLFirmwareNamespace)
+    if ($native.Data.Length -eq 0) {
+        return [pscustomobject]@{ Variable=$Name; Found=$false; Win32Error=$native.ErrorCode; Bytes=$null }
+    }
+    [pscustomobject]@{ Variable=$Name; Found=$true; Win32Error=0; Bytes=$native.Data }
+}
+
 function Get-DLFirmwareAssociationState {
     $result = @($DLFirmwareVariables | ForEach-Object { Get-DLFirmwareVariable $_ })
     Write-DLLog 'FirmwareAssociationRead' 'Read the known Device Link variables without returning their contents.' @{
@@ -822,6 +842,9 @@ if ($DeleteCloudAssociation -and $Action -ne 'RemoveAssociation') {
 }
 if ($TenantAssociatedDeviceId -and -not $DeleteCloudAssociation) {
     throw '-TenantAssociatedDeviceId is valid only together with -DeleteCloudAssociation.'
+}
+if ($Validate -and $Action -ne 'ReadAssociation') {
+    throw '-Validate is valid only with -Action ReadAssociation.'
 }
 Initialize-DLStepPlan
 Write-DLVerboseLog 'InteropInitialization' 'Loading the native Windows interop definitions used by this script.' @{ NativeTypeAlreadyLoaded=[bool]('DLKit2.Native' -as [type]); FirmwareTypeAlreadyLoaded=[bool]('DLKit4.FirmwareEnvironment' -as [type]) }
@@ -1476,6 +1499,233 @@ function Show-LinkResult([string]$raw, [bool]$discoverOnly) {
     }
 }
 
+# =====================================================================  DeviceLink token validation (ReadAssociation -Validate)
+function ConvertFrom-DLBase64Url([string]$Text) {
+    $s = $Text.Replace('-','+').Replace('_','/')
+    switch ($s.Length % 4) { 2 { $s += '==' } 3 { $s += '=' } 1 { throw 'Invalid base64url length.' } }
+    [Convert]::FromBase64String($s)
+}
+function Get-DLStringFromBytes([byte[]]$Bytes) {
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return '' }
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { return [Text.Encoding]::UTF8.GetString($Bytes,3,$Bytes.Length-3) }
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) { return [Text.Encoding]::Unicode.GetString($Bytes,2,$Bytes.Length-2) }
+    if ($Bytes.Length -ge 4 -and $Bytes[1] -eq 0 -and $Bytes[3] -eq 0) { return [Text.Encoding]::Unicode.GetString($Bytes) }
+    [Text.Encoding]::UTF8.GetString($Bytes)
+}
+function Get-DLGuidCandidates([byte[]]$Bytes) {
+    $out = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return @() }
+    $s = (Get-DLStringFromBytes $Bytes)
+    if ($s) { [void]$out.Add($s.Trim([char]0,' ','{','}','"')) }
+    if ($Bytes.Length -eq 16) { try { [void]$out.Add(([Guid][byte[]]$Bytes).ToString()) } catch {} }
+    @($out | Where-Object { $_ } | Select-Object -Unique)
+}
+function Expand-DLDeviceLinkJwt([byte[]]$Raw) {
+    $pattern = 'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*'
+    $attempts = @(
+        @{ Name='raw';           Get={ param($b) $b } }
+        @{ Name='deflate';       Get={ param($b) $ms=New-Object IO.MemoryStream(,$b); $ds=New-Object IO.Compression.DeflateStream($ms,[IO.Compression.CompressionMode]::Decompress); $o=New-Object IO.MemoryStream; $ds.CopyTo($o); $ds.Dispose(); $o.ToArray() } }
+        @{ Name='deflate-skip2'; Get={ param($b) $ms=New-Object IO.MemoryStream(,$b[2..($b.Length-1)]); $ds=New-Object IO.Compression.DeflateStream($ms,[IO.Compression.CompressionMode]::Decompress); $o=New-Object IO.MemoryStream; $ds.CopyTo($o); $ds.Dispose(); $o.ToArray() } }
+        @{ Name='gzip';          Get={ param($b) $ms=New-Object IO.MemoryStream(,$b); $gz=New-Object IO.Compression.GZipStream($ms,[IO.Compression.CompressionMode]::Decompress); $o=New-Object IO.MemoryStream; $gz.CopyTo($o); $gz.Dispose(); $o.ToArray() } }
+    )
+    foreach ($a in $attempts) {
+        try {
+            $out = & $a.Get $Raw
+            foreach ($enc in @('utf-8','utf-16')) {
+                $txt = if ($enc -eq 'utf-8') { [Text.Encoding]::UTF8.GetString($out) } else { [Text.Encoding]::Unicode.GetString($out) }
+                $m = [regex]::Match($txt,$pattern)
+                if ($m.Success) { return [pscustomobject]@{ Container="$($a.Name)/$enc"; Jwt=$m.Value } }
+            }
+        } catch {}
+    }
+    $null
+}
+function Get-DLJsonQuietly([string]$Uri) {
+    try {
+        $rest = @{ Uri=$Uri; Method='GET'; ErrorAction='Stop'; Verbose=$false }
+        $p = (Get-Command Microsoft.PowerShell.Utility\Invoke-RestMethod).Parameters
+        if ($p.ContainsKey('TimeoutSec'))        { $rest.TimeoutSec = $HttpTimeoutSec }
+        if ($p.ContainsKey('MaximumRetryCount')) { $rest.MaximumRetryCount = 0 }
+        if ($p.ContainsKey('UseBasicParsing'))   { $rest.UseBasicParsing = $true }
+        Microsoft.PowerShell.Utility\Invoke-RestMethod @rest
+    } catch { $null }
+}
+function Resolve-DLTokenSigningKeys {
+    param([string]$Issuer,[string]$DiscoveryUrl)
+    $tried = New-Object System.Collections.Generic.List[string]
+    $probe = New-Object System.Collections.Generic.List[string]
+    foreach ($base in @($Issuer,$DiscoveryUrl)) {
+        if ([string]::IsNullOrWhiteSpace($base)) { continue }
+        $t = $base.TrimEnd('/')
+        [void]$probe.Add("$t/.well-known/openid-configuration")
+        [void]$probe.Add("$t/.well-known/jwks")
+        [void]$probe.Add($t)
+    }
+    foreach ($u in ($probe | Select-Object -Unique)) {
+        [void]$tried.Add((([Uri]$u).Host + (([Uri]$u).AbsolutePath)))
+        $doc = Get-DLJsonQuietly $u
+        if (-not $doc) { continue }
+        if ($doc.keys)     { return [pscustomobject]@{ Jwks=$doc; Endpoint=$u; Tried=$tried } }
+        if ($doc.jwks_uri) {
+            [void]$tried.Add((([Uri][string]$doc.jwks_uri).Host + (([Uri][string]$doc.jwks_uri).AbsolutePath)))
+            $jwks = Get-DLJsonQuietly ([string]$doc.jwks_uri)
+            if ($jwks -and $jwks.keys) { return [pscustomobject]@{ Jwks=$jwks; Endpoint=[string]$doc.jwks_uri; Tried=$tried } }
+        }
+    }
+    [pscustomobject]@{ Jwks=$null; Endpoint=$null; Tried=$tried }
+}
+function Test-DLJwtSignature {
+    param([string]$SigningInput,[byte[]]$Signature,$Jwks,[string]$Kid,[string]$ThumbprintHex)
+    if ($null -eq $Jwks -or -not $Jwks.keys) { return [pscustomobject]@{ Verified=$null; Reason='no signing keys located' } }
+    $data = [Text.Encoding]::ASCII.GetBytes($SigningInput)
+    $idMatchedButFailed = $false
+    foreach ($key in @($Jwks.keys)) {
+        $rsa = $null; $keyThumb = $null
+        try {
+            if ($key.x5c -and @($key.x5c).Count) {
+                $cert = New-Object Security.Cryptography.X509Certificates.X509Certificate2(,[Convert]::FromBase64String([string]@($key.x5c)[0]))
+                $keyThumb = $cert.Thumbprint
+                $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($cert)
+            } elseif ($key.n -and $key.e) {
+                $pp = New-Object Security.Cryptography.RSAParameters
+                $pp.Modulus  = ConvertFrom-DLBase64Url ([string]$key.n)
+                $pp.Exponent = ConvertFrom-DLBase64Url ([string]$key.e)
+                $rsa = [Security.Cryptography.RSA]::Create(); $rsa.ImportParameters($pp)
+            }
+        } catch { $rsa = $null }
+        if ($null -eq $rsa) { continue }
+        $idMatch = ($Kid -and $key.kid -and [string]::Equals([string]$key.kid,$Kid,[StringComparison]::OrdinalIgnoreCase)) -or
+                   ($ThumbprintHex -and $keyThumb -and [string]::Equals($keyThumb,$ThumbprintHex,[StringComparison]::OrdinalIgnoreCase))
+        $ok = $false
+        try { $ok = $rsa.VerifyData($data,$Signature,[Security.Cryptography.HashAlgorithmName]::SHA256,[Security.Cryptography.RSASignaturePadding]::Pkcs1) } catch { $ok = $false }
+        if ($ok)      { return [pscustomobject]@{ Verified=$true;  Reason=$(if ($idMatch) {'signature valid; key id matched'} else {'signature valid'}) } }
+        if ($idMatch) { $idMatchedButFailed = $true }
+    }
+    [pscustomobject]@{ Verified=$false; Reason=$(if ($idMatchedButFailed) {'key id matched but signature did not verify'} else {'no published key verified the signature'}) }
+}
+function Invoke-DLValidateAssociationToken {
+    param([bool]$Online)
+    $rawVar = Get-DLFirmwareRawValue 'DeviceLinkJwtCompressed'
+    if (-not $rawVar.Found) {
+        Write-DLLog 'TokenValidation' 'DeviceLinkJwtCompressed is not present; there is no association token to validate.' @{ TokenPresent=$false; Win32Error=$rawVar.Win32Error } 'WARN'
+        [pscustomobject][ordered]@{ TokenPresent=$false; Verdict='NO TOKEN'; Detail="DeviceLinkJwtCompressed absent (Win32 $($rawVar.Win32Error))." } | Format-List | Out-Host
+        Write-Host 'Token verdict: NO TOKEN' -ForegroundColor Yellow
+        return
+    }
+    $expanded = Expand-DLDeviceLinkJwt $rawVar.Bytes
+    if (-not $expanded) {
+        $head = ($rawVar.Bytes[0..([Math]::Min(31,$rawVar.Bytes.Length-1))] | ForEach-Object { $_.ToString('X2') }) -join ' '
+        Write-DLLog 'TokenValidation' 'Could not locate a JWT inside DeviceLinkJwtCompressed after raw/deflate/gzip attempts.' @{ TokenPresent=$true; WellFormed=$false; RawBytes=$rawVar.Bytes.Length; FirstBytesHex=$head } 'ERROR'
+        [pscustomobject][ordered]@{ TokenPresent=$true; WellFormed=$false; Verdict='INVALID'; Detail="No JWT found. First bytes: $head" } | Format-List | Out-Host
+        Write-Host 'Token verdict: INVALID (no JWT found)' -ForegroundColor Red
+        return
+    }
+    $parts   = $expanded.Jwt.Split('.')
+    $header   = [Text.Encoding]::UTF8.GetString((ConvertFrom-DLBase64Url $parts[0])) | ConvertFrom-Json
+    $payload  = [Text.Encoding]::UTF8.GetString((ConvertFrom-DLBase64Url $parts[1])) | ConvertFrom-Json
+    $sigBytes = ConvertFrom-DLBase64Url $parts[2]
+    foreach ($claim in 'linkId','tpmKeyId','accountId','tenantId','sub','jti','cn','deviceIdKeyPub','deviceSerialNumber','discoveryUrl') {
+        if ($payload.$claim) { Add-DLRedaction ([string]$payload.$claim) }
+    }
+    $now  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $skew = 300
+    $iat = if ($null -ne $payload.iat) { [int64]$payload.iat } else { $null }
+    $exp = if ($null -ne $payload.exp) { [int64]$payload.exp } else { $null }
+    $nbf = if ($null -ne $payload.nbf) { [int64]$payload.nbf } else { $iat }
+    $fromEpoch = { param($s) if ($null -eq $s) { $null } else { [DateTimeOffset]::FromUnixTimeSeconds([int64]$s).UtcDateTime.ToString('o') } }
+    $wellFormed  = ($parts.Count -eq 3) -and ([string]$header.alg -eq 'RS256')
+    $notYetValid = ($null -ne $nbf) -and ($now -lt ($nbf - $skew))
+    $expired     = ($null -ne $exp) -and ($now -ge ($exp + $skew))
+    $secLeft     = if ($null -ne $exp) { [int64]$exp - $now } else { $null }
+    $lifetime    = if ($null -ne $iat -and $null -ne $exp) { [math]::Round((($exp - $iat)/86400.0),2) } else { $null }
+
+    $linkIdMatch = $null
+    $uefiLink = Get-DLFirmwareRawValue 'DeviceLinkId'
+    if ($uefiLink.Found -and $payload.linkId) {
+        $cands = Get-DLGuidCandidates $uefiLink.Bytes
+        foreach ($c in $cands) { Add-DLRedaction $c }
+        $claimLink = ([string]$payload.linkId).Trim('{','}')
+        if ($cands.Count) { $linkIdMatch = [bool]($cands | Where-Object { [string]::Equals($_,$claimLink,[StringComparison]::OrdinalIgnoreCase) }) }
+    }
+    $tenantMatch = $null
+    if ($TenantId -and $payload.tenantId) {
+        $tenantMatch = [string]::Equals(($TenantId.Trim().Trim('{','}')),(([string]$payload.tenantId).Trim().Trim('{','}')),[StringComparison]::OrdinalIgnoreCase)
+    }
+    $serialMatch = $manuMatch = $modelMatch = $null
+    try {
+        $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop
+        $cs   = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        if ($payload.deviceSerialNumber) { $serialMatch = [string]::Equals(([string]$bios.SerialNumber).Trim(),([string]$payload.deviceSerialNumber).Trim(),[StringComparison]::OrdinalIgnoreCase) }
+        if ($payload.deviceManufacturer) { $manuMatch   = [string]::Equals(([string]$cs.Manufacturer).Trim(),([string]$payload.deviceManufacturer).Trim(),[StringComparison]::OrdinalIgnoreCase) }
+        if ($payload.deviceModel)        { $modelMatch  = [string]::Equals(([string]$cs.Model).Trim(),([string]$payload.deviceModel).Trim(),[StringComparison]::OrdinalIgnoreCase) }
+    } catch {}
+    $issuerHost = $null; $issuerIsMicrosoft = $null
+    if ($payload.iss) {
+        try {
+            $issuerHost = ([Uri][string]$payload.iss).Host
+            $issuerIsMicrosoft = [bool](@('.microsoftonline.com','.microsoft.com','.windows.net','.microsoftonline.us','.azure.com') | Where-Object { $issuerHost -like "*$_" })
+        } catch {}
+    }
+    $thumbHex = [string]$header.x5t
+    if ($thumbHex -notmatch '^[0-9A-Fa-f]{40}$' -and ([string]$header.kid) -match '^[0-9A-Fa-f]{40}$') { $thumbHex = [string]$header.kid }
+
+    $sigVerified = $null; $sigDetail = 'not checked (offline; add -Online)'; $jwksEndpoint = $null
+    if ($Online) {
+        $resolved = Resolve-DLTokenSigningKeys -Issuer ([string]$payload.iss) -DiscoveryUrl ([string]$payload.discoveryUrl)
+        $jwksEndpoint = $resolved.Endpoint
+        if ($null -eq $resolved.Jwks) {
+            $sigDetail = "signing keys not located (tried: $($resolved.Tried -join ', '))"
+        } else {
+            $v = Test-DLJwtSignature -SigningInput "$($parts[0]).$($parts[1])" -Signature $sigBytes -Jwks $resolved.Jwks -Kid ([string]$header.kid) -ThumbprintHex $thumbHex
+            $sigVerified = $v.Verified; $sigDetail = $v.Reason
+        }
+    }
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if (-not $wellFormed)         { [void]$reasons.Add('not a well-formed RS256 JWT') }
+    if ($notYetValid)            { [void]$reasons.Add('not yet valid (nbf/iat in the future)') }
+    if ($expired)                { [void]$reasons.Add('expired') }
+    if ($linkIdMatch -eq $false) { [void]$reasons.Add('linkId does not match the DeviceLinkId UEFI variable') }
+    if ($tenantMatch -eq $false) { [void]$reasons.Add('tenantId does not match -TenantId') }
+    if ($serialMatch -eq $false) { [void]$reasons.Add('device serial number does not match this computer') }
+    if ($manuMatch -eq $false)   { [void]$reasons.Add('device manufacturer does not match this computer') }
+    if ($modelMatch -eq $false)  { [void]$reasons.Add('device model does not match this computer') }
+    if ($sigVerified -eq $false) { [void]$reasons.Add('signature did not verify against the published key') }
+    $verdict = if ($reasons.Count) { 'INVALID' }
+               elseif ($sigVerified) { 'VALID' }
+               elseif ($Online) { 'INDETERMINATE (signature not verified)' }
+               else { 'VALID (signature not checked)' }
+
+    $report = [pscustomobject][ordered]@{
+        TokenPresent=$true; Container=$expanded.Container; WellFormed=$wellFormed; Algorithm=[string]$header.alg
+        IssuedUtc=(& $fromEpoch $iat); NotBeforeUtc=(& $fromEpoch $nbf); ExpiresUtc=(& $fromEpoch $exp)
+        LifetimeDays=$lifetime; NotYetValid=$notYetValid; Expired=$expired
+        DaysRemaining=$(if ($null -ne $secLeft) { [math]::Round($secLeft/86400.0,2) } else { $null })
+        LinkIdMatchesUefi=$linkIdMatch
+        TenantMatches=$(if ($null -eq $tenantMatch) { 'not checked (-TenantId not supplied)' } else { $tenantMatch })
+        DeviceSerialMatches=$serialMatch; DeviceManufacturerMatches=$manuMatch; DeviceModelMatches=$modelMatch
+        IssuerHost=$issuerHost; IssuerIsMicrosoft=$issuerIsMicrosoft; SigningKeyThumbprint=$thumbHex
+        SignatureVerified=$(if ($null -eq $sigVerified) { 'NotChecked' } else { $sigVerified })
+        SignatureDetail=$sigDetail; JwksEndpoint=$jwksEndpoint
+        ValidationScope=('Structure, iat/exp window, linkId/tenant/device-binding claims' + $(if ($Online) { ', and RS256 signature.' } else { '. Signature not checked (offline).' }))
+        Verdict=$verdict
+    }
+    Write-DLLog 'TokenValidation' "DeviceLink token validation verdict: $verdict." @{
+        TokenPresent=$true; Container=$expanded.Container; WellFormed=$wellFormed; Algorithm=[string]$header.alg
+        IssuedUtc=$report.IssuedUtc; ExpiresUtc=$report.ExpiresUtc; NotYetValid=$notYetValid; Expired=$expired; LifetimeDays=$lifetime
+        LinkIdMatchesUefi=$linkIdMatch; TenantChecked=($null -ne $tenantMatch); TenantMatches=$tenantMatch
+        DeviceSerialMatches=$serialMatch; DeviceManufacturerMatches=$manuMatch; DeviceModelMatches=$modelMatch
+        IssuerHost=$issuerHost; IssuerIsMicrosoft=$issuerIsMicrosoft; SigningKeyThumbprint=$thumbHex
+        SignatureChecked=[bool]$Online; SignatureVerified=$sigVerified; SignatureDetail=$sigDetail; JwksEndpoint=$jwksEndpoint
+        Verdict=$verdict; Reasons=@($reasons); RawIdentifiersLogged=$false; TokenLogged=$false
+    } $(if ($verdict -like 'INVALID*') { 'ERROR' } elseif ($verdict -like 'INDETERMINATE*') { 'WARN' } else { 'INFO' })
+
+    if ($VerbosePreference -ne 'SilentlyContinue') { $report | Format-List | Out-Host }
+    else { $report | Select-Object WellFormed,Expired,DaysRemaining,LinkIdMatchesUefi,TenantMatches,SignatureVerified,Verdict | Format-List | Out-Host }
+    $color = if ($verdict -eq 'VALID') { 'Green' } elseif ($verdict -like 'INVALID*') { 'Red' } else { 'Yellow' }
+    Write-Host ("Token verdict: {0}" -f $verdict) -ForegroundColor $color
+    foreach ($r in $reasons) { Write-Host " - $r" -ForegroundColor $color }
+}
+
 # =====================================================================  orchestrate
 $blob = $DeviceLinkBase64
 
@@ -1486,6 +1736,13 @@ switch ($Action) {
           Write-Warning 'This reads only the known Device Link UEFI variables. Run elevated.'
           Get-DLFirmwareAssociationState | Format-Table Variable,Status,Bytes,SHA256,Attributes,Win32Error -AutoSize | Out-Host
       } | Out-Null
+      if ($Validate) {
+          Invoke-DLStep 2 {
+              if ($Online) { Write-Host 'Validating DeviceLinkJwtCompressed (offline checks + online signature verification)...' -ForegroundColor DarkGray }
+              else         { Write-Host 'Validating DeviceLinkJwtCompressed (offline checks only; add -Online to verify the signature)...' -ForegroundColor DarkGray }
+              Invoke-DLValidateAssociationToken -Online ([bool]$Online)
+          } | Out-Null
+      }
   }
 
   'RemoveAssociation' {

@@ -251,6 +251,14 @@ Upload has no automatic POST retry. If the service response is uncertain, review
 .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Verbose
 ```
 
+### Check whether the association token is valid
+
+```powershell
+.\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -Online -TenantId '<tenant-guid>' -Verbose
+```
+
+`-Validate` decodes `DeviceLinkJwtCompressed` and checks it is a well-formed RS256 JWT inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and matching tenant/device claims. `-Online` also verifies the RS256 signature against the issuer's published key. Booleans, timestamps and the signing-key thumbprint only; never the token or claim values.
+
 ### Preview local removal
 
 ```powershell
@@ -301,6 +309,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `Link` | 2 | Native Windows DeviceLink traffic | Discovers and applies the association. |
 | `Full` | 5 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers and applies. |
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
+| `ReadAssociation -Validate` | 2 | Optional (`-Online`: issuer JWKS, anonymous) | No; decodes and checks the `DeviceLinkJwtCompressed` token, optionally verifying its RS256 signature. |
 | `RemoveAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
 | `RemoveAssociation -DeleteCloudAssociation` | 4 | Microsoft identity and Graph | Resolves the cloud record, removes UEFI, sends one Graph DELETE and verifies the cloud result. |
 
@@ -327,6 +336,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-FirstPolicy` | Selects the first applicable policy returned by Graph. | Disabled |
 | `-DeleteCloudAssociation` | After verified local removal, deletes the matched Intune Device Association record. Valid only with `RemoveAssociation`. | Disabled |
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
+| `-Validate` | With `ReadAssociation`: decode and check the `DeviceLinkJwtCompressed` token (structure, `iat`/`exp` window, `linkId`/tenant/device-binding claims). Add `-Online` to verify its RS256 signature against the issuer's published key. | Disabled |
 | `-GraphBase` | Microsoft Graph base URL. Mainly useful for testing. | `https://graph.microsoft.com/beta` |
 | `-Verbose` | Shows safe decision, timing and substep details and saves them in the logs. | Disabled |
 | `-WhatIf` | Previews guarded removal operations. Online preview still performs authentication and read-only matching. | Disabled |
