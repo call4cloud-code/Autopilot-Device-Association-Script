@@ -7,7 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
-Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged.
+Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged, unless -ShowClaims is added, which also prints the decoded JOSE header and payload to the console (console only; never to the diagnostic files).
 Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
 Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
 #>
@@ -67,6 +67,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 .PARAMETER DeleteCloudAssociation  after verified UEFI removal, delete the matching Intune Device Association record
 .PARAMETER TenantAssociatedDeviceId optional exact Intune Device Association record ID; it must still match this computer
 .PARAMETER Validate      with -Action ReadAssociation: decode DeviceLinkJwtCompressed and check it is well-formed, in its iat/exp window, bound to this device and (with -Online) signed by its issuer's published key. Reports booleans and timestamps only; never the token or identity values.
+.PARAMETER ShowClaims    with -Validate: also print the decoded JOSE header and full payload claims to the console. Console only; the claim values are never written to the diagnostic files. Treat screen sharing and console capture accordingly.
 
 .EXAMPLE
     # device, fully unattended (elevated / SYSTEM):
@@ -84,6 +85,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
     .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation
     .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate
     .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -Online -TenantId t -Verbose
+    .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -ShowClaims
     .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation
     .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation -WhatIf
     .\Get-AutopilotDeviceAssociation.ps1 -Action RemoveAssociation -DeleteCloudAssociation -TenantId t -ClientId c -CertificateThumbprint th -Verbose
@@ -114,6 +116,7 @@ param(
     [string] $TenantAssociatedDeviceId,
 
     [switch] $Validate,
+    [switch] $ShowClaims,
 
     [string] $DevicePreparationPolicyId,
     [string] $PolicyName,
@@ -845,6 +848,9 @@ if ($TenantAssociatedDeviceId -and -not $DeleteCloudAssociation) {
 }
 if ($Validate -and $Action -ne 'ReadAssociation') {
     throw '-Validate is valid only with -Action ReadAssociation.'
+}
+if ($ShowClaims -and -not ($Action -eq 'ReadAssociation' -and $Validate)) {
+    throw '-ShowClaims requires -Action ReadAssociation -Validate.'
 }
 Initialize-DLStepPlan
 Write-DLVerboseLog 'InteropInitialization' 'Loading the native Windows interop definitions used by this script.' @{ NativeTypeAlreadyLoaded=[bool]('DLKit2.Native' -as [type]); FirmwareTypeAlreadyLoaded=[bool]('DLKit4.FirmwareEnvironment' -as [type]) }
@@ -1626,6 +1632,14 @@ function Invoke-DLValidateAssociationToken {
     $sigBytes = ConvertFrom-DLBase64Url $parts[2]
     foreach ($claim in 'linkId','tpmKeyId','accountId','tenantId','sub','jti','cn','deviceIdKeyPub','deviceSerialNumber','discoveryUrl') {
         if ($payload.$claim) { Add-DLRedaction ([string]$payload.$claim) }
+    }
+    if ($ShowClaims) {
+        Write-Warning 'ShowClaims prints identifiers to the console. They are not written to the diagnostic files. Consider screen sharing and console capture.'
+        Write-Host "`n=== JOSE header ===" -ForegroundColor Cyan
+        ($header | ConvertTo-Json -Depth 10) | Out-Host
+        Write-Host "=== Payload claims ===" -ForegroundColor Cyan
+        ($payload | ConvertTo-Json -Depth 10) | Out-Host
+        Write-DLVerboseLog 'TokenClaimsDisplayed' 'Printed the decoded token header and payload to the console at the operator request. Claim values were not written to the diagnostic files.' @{ ConsoleOnly=$true; ClaimsLogged=$false }
     }
     $now  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $skew = 300

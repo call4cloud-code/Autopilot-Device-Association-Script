@@ -389,6 +389,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-DeleteCloudAssociation` | After verified local removal, deletes the matched Intune Device Association record. Valid only with `RemoveAssociation`. | Disabled |
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
 | `-Validate` | With `ReadAssociation`: decode `DeviceLinkJwtCompressed` and check it is a well-formed RS256 JWT, inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and (with `-TenantId`) a matching tenant and device inventory. Add `-Online` to also verify the RS256 signature against the issuer's published key. Reports booleans, timestamps and the signing-key thumbprint only. | Disabled |
+| `-ShowClaims` | With `-Validate`: also print the decoded JOSE header and full payload claims to the console. Console only; the claim values are never written to the diagnostic files. | Disabled |
 | `-GraphBase` | Microsoft Graph base URL. Mainly useful for testing. | `https://graph.microsoft.com/beta` |
 | `-Verbose` | Adds timestamped diagnostic events, policy-selection details, polling states, HTTP progress and technical result fields to the console. | Disabled |
 | `-WhatIf` | Previews guarded removal operations. Online preview still performs authentication and read-only matching. | Disabled |
@@ -464,6 +465,12 @@ The raw UEFI contents are never returned by this action or written to its logs.
 | **RS256 signature verifies against the issuer's published key** | | **yes** |
 
 With `-Online` the script resolves the signing key from the issuer's OpenID metadata / JWKS (an anonymous request; no Graph token) and verifies the signature. The output is a `Verdict` of `VALID`, `VALID (signature not checked)` (offline), `INDETERMINATE (signature not verified)` (online but keys not located) or `INVALID` with the failed checks listed. Only booleans, timestamps and the signing-key thumbprint are printed or logged; the token and the claim values are not.
+
+Add `-ShowClaims` to also print the decoded JOSE header and the full payload to the **console** (never to the diagnostic files), the way `Inspect` shows selected CSV identifiers on screen:
+
+```powershell
+.\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -ShowClaims
+```
 
 Local removal follows a guarded sequence:
 
@@ -682,7 +689,7 @@ The package also contains exact pre-change script snapshots for comparison and r
 
 - Added `-Action ReadAssociation -Validate`: decompresses `DeviceLinkJwtCompressed`, then checks the token is a well-formed RS256 JWT, inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and (with `-TenantId`) a matching tenant and device inventory.
 - `-Validate -Online` resolves the issuer's published signing key from OpenID metadata / JWKS and verifies the RS256 signature. The lookup is anonymous; no Graph token is used.
-- The validation step prints and logs only booleans, timestamps and the signing-key thumbprint. The token and claim values are added to the redaction set.
+- The validation step prints and logs only booleans, timestamps and the signing-key thumbprint. The token and claim values are added to the redaction set. `-ShowClaims` prints the decoded header and payload to the console only.
 - No change to any other action.
 
 ### 1.3.0

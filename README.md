@@ -257,7 +257,7 @@ Upload has no automatic POST retry. If the service response is uncertain, review
 .\Get-AutopilotDeviceAssociation.ps1 -Action ReadAssociation -Validate -Online -TenantId '<tenant-guid>' -Verbose
 ```
 
-`-Validate` decodes `DeviceLinkJwtCompressed` and checks it is a well-formed RS256 JWT inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and matching tenant/device claims. `-Online` also verifies the RS256 signature against the issuer's published key. Booleans, timestamps and the signing-key thumbprint only; never the token or claim values.
+`-Validate` decodes `DeviceLinkJwtCompressed` and checks it is a well-formed RS256 JWT inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and matching tenant/device claims. `-Online` also verifies the RS256 signature against the issuer's published key. Booleans, timestamps and the signing-key thumbprint only; never the token or claim values — unless you add `-ShowClaims`, which prints the decoded header and payload to the console (never to the diagnostic files).
 
 ### Preview local removal
 
@@ -337,6 +337,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-DeleteCloudAssociation` | After verified local removal, deletes the matched Intune Device Association record. Valid only with `RemoveAssociation`. | Disabled |
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
 | `-Validate` | With `ReadAssociation`: decode and check the `DeviceLinkJwtCompressed` token (structure, `iat`/`exp` window, `linkId`/tenant/device-binding claims). Add `-Online` to verify its RS256 signature against the issuer's published key. | Disabled |
+| `-ShowClaims` | With `-Validate`: also print the decoded JOSE header and payload claims to the console (never to the diagnostic files). | Disabled |
 | `-GraphBase` | Microsoft Graph base URL. Mainly useful for testing. | `https://graph.microsoft.com/beta` |
 | `-Verbose` | Shows safe decision, timing and substep details and saves them in the logs. | Disabled |
 | `-WhatIf` | Previews guarded removal operations. Online preview still performs authentication and read-only matching. | Disabled |
