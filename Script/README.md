@@ -524,8 +524,6 @@ The HTTP artifacts cover only requests made by this PowerShell process. They do 
 
 ### The upload returns HTTP 500
 
-Do not edit the CSV, change the declared salt length or re-encode the JSON as a workaround. That breaks the relationship between the signed inventory and its metadata.
-
 Run `Inspect` against the exact failing file and retain:
 
 - The CSV SHA-256.
@@ -536,7 +534,6 @@ Run `Inspect` against the exact failing file and retain:
 - Graph `request-id` and `client-request-id`.
 - The redacted response body from the HTTP artifact.
 
-Compare those results with a known working export. A matching salt field establishes only that part of the signature structure. It does not identify the service-side validation that returned 500.
 
 ### Graph authentication fails
 
