@@ -39,7 +39,7 @@ The technical background and complete 12-step flow are explained in the Patch My
 | Capability | What it does |
 |---|---|
 | Export | Asks the Windows DeviceLink API to create a genuine `*.devicelink.csv` containing the device's TPM-backed identity package. |
-| Inspect | Decodes the CSV and reports device inventory, signing metadata, the declared RSA-PSS salt length and the salt length recovered from the signature structure. |
+| Inspect | Decodes the CSV and reports device inventory. |
 | Upload | Sends the unchanged CSV `Data` value and selected Device Preparation policy to Intune through Microsoft Graph. |
 | Wait | Polls the imported record until it reaches `preassociated` or `associated`. |
 | Discover | Asks the native Windows DeviceLink manager to discover the tenant's enrollment service. |
@@ -49,7 +49,6 @@ The technical background and complete 12-step flow are explained in the Patch My
 | Remove cloud association | Optionally resolves and deletes the matching Intune Device Association record after local UEFI removal succeeds. |
 | Diagnose | Creates numbered steps, safe verbose events and one redacted diagnostic artifact for every REST request. |
 
-The script does not generate a replacement identity, change the RSA-PSS salt, re-sign a CSV or turn a virtual machine into supported Device Association hardware. The exported `Data` value is preserved exactly for upload.
 
 ## How Device Association works
 
@@ -390,8 +389,6 @@ The CSV contains a Base64-encoded JSON identity package. It includes device inve
 2. Requires one CSV row with a nonempty `Data` field.
 3. Decodes the Base64 value into JSON.
 4. Locates the public key named by `DeviceInfoSigningKeyName`.
-5. Reads the RSA-PSS encoded signature structure.
-6. Compares the recovered salt length with `DeviceInfoSignaturePssSaltLength`.
 
 Example output:
 
@@ -404,12 +401,6 @@ SaltLength_inSignature  : 222
 FieldMatchesSignature   : True
 ValidationScope         : Salt structure only; the inventory message digest has not been verified.
 ```
-
-A salt length of `222` is not automatically proof that the CSV is corrupt. The useful local check is whether the declared value matches the encoded signature. The Intune service still performs its own validation, and an HTTP 500 does not reveal which internal validation failed.
-
-> [!NOTE]
-> `Inspect` is a structural RSA-PSS check. It does not reconstruct the exact signed inventory message and does not perform full cryptographic verification of that message. It also cannot prove that Intune will accept the export.
-
 The console intentionally displays selected identifiers such as serial number, SMBIOS UUID and Link ID. The saved diagnostic files redact those values. Consider screen sharing and console capture separately from file logging.
 
 ## Reading and removing the UEFI association
