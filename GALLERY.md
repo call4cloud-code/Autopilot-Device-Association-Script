@@ -2,7 +2,7 @@
 
 One command for the whole **Windows Autopilot device association** lifecycle: export the device's TPM-backed identity, register it in Intune, apply the tenant-signed association, check whether it is still valid, and remove it again.
 
-Classic Autopilot has `Get-WindowsAutopilotInfo`. Device association did not have an equivalent — this is it.
+Classic Autopilot has `Get-WindowsAutopilotInfo`. Device association did not have an equivalent — this is it. Different artifact, different endpoint, so the two are not interchangeable.
 
 ## Install
 
@@ -27,7 +27,7 @@ Get-AutopilotDeviceAssociation
 # 1. Will this device even work?
 Get-AutopilotDeviceAssociation -Action CheckRequirements -Online
 
-# 2. Associate it end to end (export, import, wait, link)
+# 2. Associate it end to end (export, import, wait, link, confirm)
 Get-AutopilotDeviceAssociation -Action Full
 
 # 3. Is the association real, in date, and bound to this machine?
@@ -39,7 +39,38 @@ Get-AutopilotDeviceAssociation -Action RemoveAssociation -WhatIf
 
 `-Action` defaults to `Full`, so a bare `Get-AutopilotDeviceAssociation` runs the whole pipeline.
 
-Other actions: `Export`, `Inspect`, `Upload`, `Sync`, `Discover`, `Link`.
+## Start here: does this device qualify?
+
+```text
+Check                            Result  Detail
+-----                            ------  ------
+Physical device                  Pass    Dell Inc. Latitude 5480
+Windows version                  Pass    Windows 11 25H2, build 26200.9278
+Windows edition                  Pass    Enterprise
+TPM 2.0 present                  Pass    SpecVersion 2.0 - Nuvoton, discrete
+TPM ready (not RFM)              Pass    IsReadyInformation = 0
+UEFI firmware                    Pass    Booted in UEFI mode
+TPM supports the association key Fail    The TPM refused to create
+                                         DEVICEASSOCIATION_TACK_RSA with
+                                         NTE_NOT_SUPPORTED. Check for an OEM
+                                         TPM firmware update.
+
+Requirements: 1 requirement(s) not met
+```
+
+That last check matters. A device can pass every documented requirement and still fail, because its TPM firmware cannot create the key device association needs. Without it you get a bare `0x8103C00F` after a two-minute hang.
+
+## All actions
+
+| Action | Does |
+|---|---|
+| `CheckRequirements` | Verify the device qualifies. Read-only. |
+| `Export` / `Inspect` | Produce and decode the `*.devicelink.csv`. |
+| `Upload` / `Sync` | Import into Intune and wait for pre-association. |
+| `Discover` / `Link` | Native tenant discovery, then apply the association. |
+| `Full` *(default)* | All of the above, then confirm Intune reports `associated`. |
+| `ReadAssociation` | Report the UEFI markers; `-Validate` checks the token. |
+| `RemoveAssociation` | Clear UEFI **and** the Intune record. |
 
 ## Requirements
 
@@ -69,13 +100,13 @@ Device-code sign-in is the default — nothing to configure, and the token never
 
 `RemoveAssociation` clears the local UEFI variables **and** deletes the matching Intune record. Add `-KeepCloudAssociation` (alias `-LocalOnly`) to clear UEFI only.
 
-Local removal reads every known variable first and stops without touching anything if any read fails, deletes only what is present, then reads each one back and fails if anything survived. The cloud record must match this computer **exactly and uniquely**, and is deleted only after local removal is verified.
+Local removal reads every known variable first and stops without touching anything if any read fails, deletes only what is present, then reads each one back and fails if anything survived. The cloud record must match this computer **exactly and uniquely** — zero or ambiguous matches abort before anything is touched — and a single `DELETE` is sent only after local removal is verified.
 
 > Removal does **not** unenroll the device, clear the TPM, or delete the Intune managed-device or Entra objects. If the machine is still MDM-managed, its provider can associate it again.
 
 ## When it goes wrong
 
-Every run writes a redacted diagnostic folder under `C:\ProgramData\DeviceLink\Logs\`, with one artifact per REST call. Tokens, secrets, device identifiers and the DeviceLink payload are redacted.
+Every run writes a diagnostic folder under `C:\ProgramData\DeviceLink\Logs\`, with one artifact per REST call. Tokens, secrets, device identifiers, UEFI contents and the DeviceLink payload are redacted, so the folder is safe to attach to a support case.
 
 | Code | Meaning |
 |---|---|
@@ -86,7 +117,7 @@ Every run writes a redacted diagnostic folder under `C:\ProgramData\DeviceLink\L
 
 ## Exit codes
 
-`0` success, `1` error, `2` the device does not meet the requirements - so `CheckRequirements` is usable as a gate in a task sequence.
+`0` success, `1` error, `2` the device does not meet the requirements — so `CheckRequirements` works as a gate in a task sequence.
 
 ## Deliberate limits
 
