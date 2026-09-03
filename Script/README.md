@@ -99,6 +99,20 @@ Run `-Action CheckRequirements` to verify most of these against the local machin
 ```powershell
 .\Get-AutopilotDeviceAssociation.ps1 -Action CheckRequirements -Online
 ```
+
+> [!NOTE]
+> When Microsoft documents a newer Windows 11 release for Device Association, add it to the `$DL_REQ_BUILDS` table near the top of the requirements section in the script:
+>
+> ```powershell
+> $DL_REQ_BUILDS = @{
+>     '24H2' = @{ Build = 26100; MinUbr = 9278 }
+>     '25H2' = @{ Build = 26200; MinUbr = 9278 }
+>     '26H2' = @{ Build = 26300; MinUbr = 1234 }   # add new releases here
+> }
+> ```
+>
+> Until then a newer build is reported as a **warning, not a failure** - it already supersedes KB5120998, so the script treats it as untested rather than unsupported and does not disqualify the device.
+
 The script has been parsed and tested with Windows PowerShell 5.1 and PowerShell 7.6. The tests use local Graph and firmware substitutes; they do not prove that every Windows build or tenant exposes the same beta behavior.
 
 
@@ -708,6 +722,7 @@ The package also contains exact pre-change script snapshots for comparison and r
 - Checks: physical device (virtual machines are not supported), 64-bit Windows 11 client, a supported build (24H2 `26100.9278` or 25H2 `26200.9278`, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, Secure Boot, and whether the TPM has recently refused to create the `DEVICEASSOCIATION_TACK_RSA` key.
 - `-Online` additionally tests TCP 443 to `ztd.dds.microsoft.com` and the thirteen `attest.azure.net` endpoints.
 - `Export`, `Sync`, `Discover`, `Link` and `Full` now run the same check as a **non-blocking** preflight and warn when the device does not qualify.
+- A Windows build newer than the documented releases is reported as a warning, not a failure: it already supersedes KB5120998, so it is treated as untested rather than unsupported. New releases are added by editing the `$DL_REQ_BUILDS` table.
 - Checks that need elevation report `Unknown` rather than a false failure, and the report says so.
 
 ### 1.4.0

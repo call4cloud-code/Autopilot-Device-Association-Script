@@ -1833,7 +1833,10 @@ function Test-DLDeviceRequirements {
         $results.Add((New-DLCheck 'Windows client SKU' 'Fail' "InstallationType is '$instType'. Device Association targets Windows client."))
     }
 
-    $match = $DL_REQ_BUILDS.GetEnumerator() | Where-Object { $_.Value.Build -eq $build } | Select-Object -First 1
+    $known    = ($DL_REQ_BUILDS.GetEnumerator() | Sort-Object { $_.Value.Build } | ForEach-Object { "$($_.Key) = $($_.Value.Build).$($_.Value.MinUbr)+" }) -join '; '
+    $maxKnown = ($DL_REQ_BUILDS.Values | ForEach-Object { [int]$_.Build } | Measure-Object -Maximum).Maximum
+    $dispText = if ($disp) { " ($disp)" } else { '' }
+    $match    = $DL_REQ_BUILDS.GetEnumerator() | Where-Object { $_.Value.Build -eq $build } | Select-Object -First 1
     if ($match) {
         $minUbr = [int]$match.Value.MinUbr
         if ($ubr -ge $minUbr) {
@@ -1841,13 +1844,15 @@ function Test-DLDeviceRequirements {
         } else {
             $results.Add((New-DLCheck 'Windows version' 'Fail' "Windows 11 $($match.Key) build $fullBuild is below $($match.Value.Build).$minUbr. Install $DL_REQ_KB or later."))
         }
+    } elseif ($build -gt $maxKnown) {
+        # A later Windows 11 release than anything Microsoft has documented for Device
+        # Association. It necessarily supersedes $DL_REQ_KB, so this is 'untested',
+        # not 'unsupported' - warn, but do not treat the device as disqualified.
+        $results.Add((New-DLCheck 'Windows version' 'Warn' "Build $fullBuild$dispText is newer than the documented releases ($known) and already supersedes $DL_REQ_KB. Microsoft has not published Device Association requirements for it yet, so treat it as untested rather than unsupported."))
+    } elseif ($build -ge 22000) {
+        $results.Add((New-DLCheck 'Windows version' 'Fail' "Build $fullBuild$dispText is a Windows 11 release that is not supported for Device Association. Documented: $known."))
     } else {
-        $known = ($DL_REQ_BUILDS.GetEnumerator() | Sort-Object { $_.Value.Build } | ForEach-Object { "$($_.Key) = $($_.Value.Build).$($_.Value.MinUbr)+" }) -join '; '
-        $newer = $build -gt 26200
-        $state = if ($newer) { 'Warn' } else { 'Fail' }
-        $note  = if ($newer) { 'is newer than any documented supported build; Device Association may not be enabled on it' } else { 'is not a documented supported build' }
-        $dispText = if ($disp) { " ($disp)" } else { '' }
-        $results.Add((New-DLCheck 'Windows version' $state "Build $fullBuild$dispText $note. Documented: $known."))
+        $results.Add((New-DLCheck 'Windows version' 'Fail' "Build $fullBuild$dispText is not Windows 11. Device Association requires Windows 11. Documented: $known."))
     }
 
     # ---- edition ---------------------------------------------------------
