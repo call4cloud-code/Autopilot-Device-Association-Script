@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.4.0
+.VERSION 1.5.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions now run the same check as a non-blocking preflight and warn when the device does not qualify.
 Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged, unless -ShowClaims is added, which also prints the decoded JOSE header and payload to the console (console only; never to the diagnostic files).
 Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
 Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
@@ -20,6 +21,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
       Upload   - pre-associate the device in Intune via Graph (importTenantAssociatedDevice)
       Discover - RequestDiscoveryUrlAsync (health check: is the pre-association live?)
       Link     - Discover + ConfigureDeviceLinkAsync (the OOBE "Next" button; see note)
+      CheckRequirements - check the documented OS, edition, TPM, firmware and endpoint requirements
       ReadAssociation   - read hashes/status of known Device Link UEFI variables; add -Validate to check the DeviceLinkJwtCompressed token (offline), or -Validate -Online to also verify its signature
       RemoveAssociation - delete and verify the Device Link association variables; optionally delete the Intune association record
       Sync     - Export + Upload + wait until preassociated
@@ -55,7 +57,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 
 .PARAMETER LogFolder     Parent directory for separate per-run diagnostic folders (default: WorkFolder\Logs).
 .PARAMETER HttpTimeoutSec HTTP timeout in seconds. Upload POST requests are not automatically retried.
-.PARAMETER Action        Full (default) | Sync | Export | Inspect | Upload | Discover | Link | ReadAssociation | RemoveAssociation
+.PARAMETER Action        Full (default) | Sync | Export | Inspect | Upload | Discover | Link | ReadAssociation | RemoveAssociation | CheckRequirements
 .PARAMETER CsvPath       existing *.devicelink.csv (else newest in -WorkFolder, else -Export makes one)
 .PARAMETER Online        shorthand for Upload when Action is omitted; when Action is supplied, the explicit action takes precedence
 .PARAMETER Version       display the toolkit version without creating logs or performing an action
@@ -92,7 +94,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 #>
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
 param(
-    [ValidateSet('Full','Sync','Export','Inspect','Upload','Discover','Link','ReadAssociation','RemoveAssociation')]
+    [ValidateSet('Full','Sync','Export','Inspect','Upload','Discover','Link','ReadAssociation','RemoveAssociation','CheckRequirements')]
     [string] $Action = 'Full',
 
     [switch] $Online,
@@ -126,7 +128,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.4.0'
+$DL_SCRIPT_VERSION = '1.5.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -277,6 +279,7 @@ function Write-DLVerboseLog {
 }
 function Get-DLActionPlan([string]$SelectedAction) {
     switch ($SelectedAction) {
+        'CheckRequirements' { @('Check the documented Device Association requirements') }
         'ReadAssociation'   {
             if ($Validate) { @('Read and report the known Device Link UEFI markers','Validate the DeviceLinkJwtCompressed token') }
             else           { @('Read and report the known Device Link UEFI markers') }
@@ -1740,10 +1743,266 @@ function Invoke-DLValidateAssociationToken {
     foreach ($r in $reasons) { Write-Host " - $r" -ForegroundColor $color }
 }
 
+
+# =====================================================================  Device Association requirements
+# https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements
+$DL_REQ_BUILDS = @{
+    '24H2' = @{ Build = 26100; MinUbr = 9278 }
+    '25H2' = @{ Build = 26200; MinUbr = 9278 }
+}
+$DL_REQ_KB       = 'KB5120998'
+$DL_REQ_EDITIONS = @(
+    'Professional'              # Windows 11 Pro
+    'ProfessionalEducation'     # Windows 11 Pro Education
+    'ProfessionalWorkstation'   # Windows 11 Pro for Workstations
+    'Enterprise'                # Windows 11 Enterprise
+    'Education'                 # Windows 11 Education
+    'EnterpriseS'               # Windows 11 Enterprise LTSC
+    'IoTEnterpriseS'            # Windows 11 IoT Enterprise LTSC
+)
+$DL_REQ_ENDPOINTS = @(
+    'ztd.dds.microsoft.com'
+    'peapdamaa1.eus2.attest.azure.net'
+    'peapdamaa2.wus2.attest.azure.net'
+    'peapdamaa3.cus.attest.azure.net'
+    'peapdamaa5.cus.attest.azure.net'
+    'peapdamaa6.neu.attest.azure.net'
+    'peapdamaa7.weu.attest.azure.net'
+    'peapdamaa8.sasia.attest.azure.net'
+    'peapdamaa9.eau.attest.azure.net'
+    'peapdamaa19.wus2.attest.azure.net'
+    'peapdamaa86.cin.attest.azure.net'
+    'peapdamaa89.jpe.attest.azure.net'
+    'peapdamaa93.weu.attest.azure.net'
+)
+
+function New-DLCheck([string]$Name, [string]$State, [string]$Detail) {
+    [pscustomobject][ordered]@{ Check = $Name; Result = $State; Detail = $Detail }
+}
+
+function Test-DLVirtualMachine {
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        $text = ('{0} {1}' -f $cs.Manufacturer, $cs.Model).Trim()
+        $markers = 'Virtual|VMware|VirtualBox|innotek|QEMU|KVM|Xen|Parallels|Hyper-V|Bochs|Google Compute|Amazon EC2'
+        return [pscustomobject]@{ IsVm = [bool]($text -match $markers); Evidence = $text }
+    } catch { return [pscustomobject]@{ IsVm = $null; Evidence = $_.Exception.Message } }
+}
+
+function Test-DLDeviceRequirements {
+    [CmdletBinding()]
+    param([switch]$IncludeEndpoints)
+
+    $results = New-Object System.Collections.Generic.List[object]
+    $cv = $null
+    try { $cv = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop } catch {}
+
+    # ---- elevation (several checks below need it) -------------------------
+    $isAdmin = $false
+    try { $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}
+    if ($isAdmin) {
+        $results.Add((New-DLCheck 'Elevated session' 'Pass' 'Running as administrator'))
+    } else {
+        $results.Add((New-DLCheck 'Elevated session' 'Warn' 'Not elevated. The TPM, firmware and event-log checks cannot run; re-run as administrator for a complete result.'))
+    }
+    # ---- physical device -------------------------------------------------
+    $vm = Test-DLVirtualMachine
+    if ($vm.IsVm -eq $true) {
+        $results.Add((New-DLCheck 'Physical device' 'Fail' "Virtual machines are not supported. Detected: $($vm.Evidence)"))
+    } elseif ($vm.IsVm -eq $false) {
+        $results.Add((New-DLCheck 'Physical device' 'Pass' $vm.Evidence))
+    } else {
+        $results.Add((New-DLCheck 'Physical device' 'Unknown' $vm.Evidence))
+    }
+
+    # ---- architecture ----------------------------------------------------
+    if ([Environment]::Is64BitOperatingSystem) {
+        $results.Add((New-DLCheck '64-bit OS' 'Pass' 'x64 or arm64'))
+    } else {
+        $results.Add((New-DLCheck '64-bit OS' 'Fail' '32-bit operating system'))
+    }
+
+    # ---- Windows build ---------------------------------------------------
+    $build    = if ($cv) { [int]$cv.CurrentBuildNumber } else { 0 }
+    $ubr      = if ($cv -and $null -ne $cv.UBR) { [int]$cv.UBR } else { 0 }
+    $disp     = if ($cv) { [string]$cv.DisplayVersion } else { '' }
+    $instType = if ($cv) { [string]$cv.InstallationType } else { '' }
+    $fullBuild = "$build.$ubr"
+
+    if ($instType -and $instType -ne 'Client') {
+        $results.Add((New-DLCheck 'Windows client SKU' 'Fail' "InstallationType is '$instType'. Device Association targets Windows client."))
+    }
+
+    $match = $DL_REQ_BUILDS.GetEnumerator() | Where-Object { $_.Value.Build -eq $build } | Select-Object -First 1
+    if ($match) {
+        $minUbr = [int]$match.Value.MinUbr
+        if ($ubr -ge $minUbr) {
+            $results.Add((New-DLCheck 'Windows version' 'Pass' "Windows 11 $($match.Key), build $fullBuild (minimum $($match.Value.Build).$minUbr, $DL_REQ_KB)"))
+        } else {
+            $results.Add((New-DLCheck 'Windows version' 'Fail' "Windows 11 $($match.Key) build $fullBuild is below $($match.Value.Build).$minUbr. Install $DL_REQ_KB or later."))
+        }
+    } else {
+        $known = ($DL_REQ_BUILDS.GetEnumerator() | Sort-Object { $_.Value.Build } | ForEach-Object { "$($_.Key) = $($_.Value.Build).$($_.Value.MinUbr)+" }) -join '; '
+        $newer = $build -gt 26200
+        $state = if ($newer) { 'Warn' } else { 'Fail' }
+        $note  = if ($newer) { 'is newer than any documented supported build; Device Association may not be enabled on it' } else { 'is not a documented supported build' }
+        $dispText = if ($disp) { " ($disp)" } else { '' }
+        $results.Add((New-DLCheck 'Windows version' $state "Build $fullBuild$dispText $note. Documented: $known."))
+    }
+
+    # ---- edition ---------------------------------------------------------
+    $edition = if ($cv) { [string]$cv.EditionID } else { '' }
+    $product = if ($cv) { [string]$cv.ProductName } else { '' }
+    if ($edition -and ($DL_REQ_EDITIONS -contains $edition)) {
+        $results.Add((New-DLCheck 'Windows edition' 'Pass' "$edition ($product)"))
+    } elseif ($edition) {
+        $results.Add((New-DLCheck 'Windows edition' 'Fail' "$edition is not supported. Supported: $($DL_REQ_EDITIONS -join ', ')."))
+    } else {
+        $results.Add((New-DLCheck 'Windows edition' 'Unknown' 'EditionID could not be read.'))
+    }
+
+    # ---- TPM -------------------------------------------------------------
+    try {
+        $tpm = Get-CimInstance -Namespace root/cimv2/security/microsofttpm -ClassName Win32_Tpm -ErrorAction Stop
+        $spec = ([string]$tpm.SpecVersion -split ',')[0].Trim()
+        if ($spec -like '2.0*') {
+            $results.Add((New-DLCheck 'TPM 2.0 present' 'Pass' "SpecVersion $spec, $($tpm.ManufacturerIdTxt) version $($tpm.ManufacturerVersion)"))
+        } else {
+            $results.Add((New-DLCheck 'TPM 2.0 present' 'Fail' "TPM reports SpecVersion $spec. TPM 2.0 is required."))
+        }
+        $enabled   = [bool]$tpm.IsEnabled_InitialValue
+        $activated = [bool]$tpm.IsActivated_InitialValue
+        if ($enabled -and $activated) {
+            $results.Add((New-DLCheck 'TPM enabled' 'Pass' 'Enabled and activated'))
+        } else {
+            $results.Add((New-DLCheck 'TPM enabled' 'Fail' "Enabled=$enabled Activated=$activated. Enable the TPM in firmware."))
+        }
+        try {
+            $ready = $tpm | Invoke-CimMethod -MethodName 'IsReadyInformation' -ErrorAction Stop
+            $info = [uint32]$ready.Information
+            if ($info -eq 0) {
+                $results.Add((New-DLCheck 'TPM ready (not RFM)' 'Pass' 'IsReadyInformation = 0'))
+            } else {
+                $results.Add((New-DLCheck 'TPM ready (not RFM)' 'Fail' ('IsReadyInformation = 0x{0:X8}. The TPM is not fully ready and may be in Reduced Functionality Mode.' -f $info)))
+            }
+        } catch {
+            $results.Add((New-DLCheck 'TPM ready (not RFM)' 'Unknown' $_.Exception.Message))
+        }
+    } catch {
+        $msg = $_.Exception.Message
+        if ($msg -match 'Access is denied|Access denied') {
+            $results.Add((New-DLCheck 'TPM 2.0 present' 'Unknown' 'The TPM WMI provider needs an elevated session. Re-run as administrator.'))
+        } else {
+            $results.Add((New-DLCheck 'TPM 2.0 present' 'Fail' "No TPM found, or the TPM WMI provider is unavailable: $msg"))
+        }
+    }
+
+    # ---- UEFI ------------------------------------------------------------
+    $firmware = $null
+    try { $firmware = if ([int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name PEFirmwareType -ErrorAction Stop).PEFirmwareType -eq 2) { 'UEFI' } else { 'BIOS' } } catch {}
+    if (-not $firmware) {
+        # PEFirmwareType only exists in WinPE. On a full OS, Confirm-SecureBootUEFI
+        # returns a bool on UEFI and throws PlatformNotSupported on legacy BIOS.
+        try { $null = Confirm-SecureBootUEFI -ErrorAction Stop; $firmware = 'UEFI' }
+        catch { if ($_.Exception.Message -match 'not supported|Unsupported') { $firmware = 'BIOS' } }
+    }
+    switch ($firmware) {
+        'UEFI' { $results.Add((New-DLCheck 'UEFI firmware' 'Pass' 'Booted in UEFI mode')) }
+        'BIOS' { $results.Add((New-DLCheck 'UEFI firmware' 'Fail' 'Legacy BIOS boot. UEFI is required to store the association.')) }
+        default { $results.Add((New-DLCheck 'UEFI firmware' 'Unknown' 'Firmware mode could not be determined (an elevated session is usually required).')) }
+    }
+    try {
+        $sb = Confirm-SecureBootUEFI -ErrorAction Stop
+        $sbState = if ($sb) { 'Pass' } else { 'Warn' }
+        $sbText  = if ($sb) { 'Secure Boot is on' } else { 'Secure Boot is off. TPM attestation generally expects it to be enabled.' }
+        $results.Add((New-DLCheck 'Secure Boot' $sbState $sbText))
+    } catch {}
+    # ---- can the TPM actually create the Device Association key? ----------
+    try {
+        $since = (Get-Date).AddHours(-24)
+        $tack = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Crypto-NCrypt/Operational'; StartTime = $since } -ErrorAction Stop |
+                  Where-Object { $_.Message -match 'DEVICEASSOCIATION_TACK' -and $_.Message -match '0x80090029' })
+        if ($tack.Count) {
+            $results.Add((New-DLCheck 'TPM supports the association key' 'Fail' ('The TPM refused to create DEVICEASSOCIATION_TACK_RSA with NTE_NOT_SUPPORTED (0x80090029) {0} time(s) in the last 24 hours. This is a TPM firmware capability problem; check for an OEM TPM firmware update.' -f $tack.Count)))
+        } else {
+            $results.Add((New-DLCheck 'TPM supports the association key' 'Pass' 'No NTE_NOT_SUPPORTED failures against DEVICEASSOCIATION_TACK_RSA in the last 24 hours'))
+        }
+    } catch {
+        $results.Add((New-DLCheck 'TPM supports the association key' 'Unknown' 'The Crypto-NCrypt operational log could not be read (an elevated session is usually required).'))
+    }
+
+    # ---- endpoints (opt-in, network) -------------------------------------
+    if ($IncludeEndpoints) {
+        foreach ($endpointHost in $DL_REQ_ENDPOINTS) {
+            $ok = $false
+            try { $ok = [bool](Test-NetConnection -ComputerName $endpointHost -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop) } catch { $ok = $false }
+            $state = if ($ok) { 'Pass' } else { 'Fail' }
+            $detail = if ($ok) { 'TCP 443 reachable' } else { 'TCP 443 not reachable' }
+            $results.Add((New-DLCheck "Endpoint $endpointHost" $state $detail))
+        }
+    }
+
+    $fail = @($results | Where-Object Result -eq 'Fail')
+    $warn = @($results | Where-Object Result -eq 'Warn')
+    $summary = if ($fail.Count) { "$($fail.Count) requirement(s) not met" }
+               elseif ($warn.Count) { "$($warn.Count) warning(s)" }
+               else { 'All checked requirements met' }
+    [pscustomobject]@{
+        Checks    = $results
+        Failures  = $fail
+        Warnings  = $warn
+        Supported = ($fail.Count -eq 0)
+        Summary   = $summary
+    }
+}
+
+function Write-DLRequirementsReport($Report) {
+    $Report.Checks | Format-Table Check, Result, Detail -AutoSize -Wrap | Out-Host
+    Write-DLLog 'RequirementsChecked' $Report.Summary @{
+        Supported = $Report.Supported
+        Checks    = @($Report.Checks | Select-Object Check, Result, Detail)
+    } $(if (-not $Report.Supported) { 'ERROR' } elseif ($Report.Warnings.Count) { 'WARN' } else { 'INFO' })
+    if ($Report.Supported) {
+        Write-Host "Requirements: $($Report.Summary)" -ForegroundColor Green
+    } else {
+        Write-Host "Requirements: $($Report.Summary)" -ForegroundColor Red
+        foreach ($f in $Report.Failures) { Write-Host " - $($f.Check): $($f.Detail)" -ForegroundColor Red }
+    }
+    foreach ($w in $Report.Warnings) { Write-Host " ! $($w.Check): $($w.Detail)" -ForegroundColor Yellow }
+}
+
+# Non-blocking preflight used by the device-side actions.
+function Invoke-DLRequirementsPreflight {
+    try {
+        $r = Test-DLDeviceRequirements
+        if (-not $r.Supported) {
+            Write-Warning "This device does not meet the documented Device Association requirements: $($r.Summary). Continuing anyway; run -Action CheckRequirements for the detail."
+            foreach ($f in $r.Failures) { Write-Warning " - $($f.Check): $($f.Detail)" }
+        }
+        Write-DLLog 'RequirementsPreflight' $r.Summary @{
+            Supported = $r.Supported
+            Failures  = @($r.Failures | Select-Object Check, Detail)
+            Blocking  = $false
+        } $(if (-not $r.Supported) { 'WARN' } else { 'INFO' })
+    } catch {
+        Write-DLLog 'RequirementsPreflight' 'The requirements preflight could not run.' @{ Error = (Protect-DLText $_.Exception.Message) } 'WARN'
+    }
+}
 # =====================================================================  orchestrate
 $blob = $DeviceLinkBase64
 
 switch ($Action) {
+  'CheckRequirements' {
+      Invoke-DLStep 1 {
+          Write-Host 'Checking the documented Windows Autopilot Device Association requirements...' -ForegroundColor DarkGray
+          $report = Test-DLDeviceRequirements -IncludeEndpoints:$Online
+          Write-DLRequirementsReport $report
+          if (-not $report.Supported) {
+              Write-Host 'Requirements reference: https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements' -ForegroundColor DarkGray
+          }
+      } | Out-Null
+  }
+
 
   'ReadAssociation' {
       Invoke-DLStep 1 {
@@ -1828,6 +2087,7 @@ switch ($Action) {
 
 
   'Export' {
+      Invoke-DLRequirementsPreflight
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       Invoke-DLStep 2 { Invoke-Inspect $csv | Out-Host } | Out-Null
@@ -1858,6 +2118,7 @@ switch ($Action) {
   }
 
   'Sync' {
+      Invoke-DLRequirementsPreflight
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       $blob = Invoke-DLStep 2 { Get-BlobFromCsv $csv }
@@ -1867,6 +2128,7 @@ switch ($Action) {
   }
 
   'Discover' {
+      Invoke-DLRequirementsPreflight
       $blob = Invoke-DLStep 1 {
           if ($DeviceLinkBase64) {
               Write-DLVerboseLog 'InputSelection' 'Using the DeviceLinkBase64 value supplied by the caller.' @{ Source='DeviceLinkBase64 parameter'; Characters=$DeviceLinkBase64.Length; RawValueLogged=$false }
@@ -1880,6 +2142,7 @@ switch ($Action) {
   }
 
   'Link' {
+      Invoke-DLRequirementsPreflight
       $blob = Invoke-DLStep 1 {
           if ($DeviceLinkBase64) {
               Write-DLVerboseLog 'InputSelection' 'Using the DeviceLinkBase64 value supplied by the caller.' @{ Source='DeviceLinkBase64 parameter'; Characters=$DeviceLinkBase64.Length; RawValueLogged=$false }
@@ -1893,6 +2156,7 @@ switch ($Action) {
   }
 
   'Full' {
+      Invoke-DLRequirementsPreflight
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       $b = Invoke-DLStep 2 {

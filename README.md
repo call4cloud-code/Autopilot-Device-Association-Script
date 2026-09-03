@@ -245,6 +245,14 @@ Upload has no automatic POST retry. If the service response is uncertain, review
   -Verbose
 ```
 
+### Check whether this device qualifies
+
+```powershell
+.\Get-AutopilotDeviceAssociation.ps1 -Action CheckRequirements -Online
+```
+
+Verifies the [documented requirements](https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements): a physical device, Windows 11 24H2 `26100.9278` or 25H2 `26200.9278` (KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and with `-Online` the required Microsoft endpoints. The device-side actions run the same check as a non-blocking preflight.
+
 ### Read the local UEFI markers
 
 ```powershell
@@ -308,6 +316,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `Discover` | 2 | Native Windows DeviceLink traffic | Requests tenant discovery without applying the association. |
 | `Link` | 2 | Native Windows DeviceLink traffic | Discovers and applies the association. |
 | `Full` | 5 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers and applies. |
+| `CheckRequirements` | 1 | No (or endpoint tests with `-Online`) | No; verifies the documented Device Association requirements. |
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
 | `ReadAssociation -Validate` | 2 | Optional (`-Online`: issuer JWKS, anonymous) | No; decodes and checks the `DeviceLinkJwtCompressed` token, optionally verifying its RS256 signature. |
 | `RemoveAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
@@ -319,7 +328,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 
 | Parameter | Purpose | Default |
 |---|---|---|
-| `-Action` | Selects `Full`, `Sync`, `Export`, `Inspect`, `Upload`, `Discover`, `Link`, `ReadAssociation` or `RemoveAssociation`. | `Full` |
+| `-Action` | Selects `Full`, `Sync`, `Export`, `Inspect`, `Upload`, `Discover`, `Link`, `ReadAssociation`, `RemoveAssociation` or `CheckRequirements`. | `Full` |
 | `-CsvPath` | Path to an existing `*.devicelink.csv`. | Newest CSV in `WorkFolder` where supported by the action. |
 | `-DeviceLinkBase64` | Supplies the CSV `Data` value directly. | None |
 | `-WorkFolder` | Stores exports and supplies the default CSV search location. | `C:\ProgramData\DeviceLink` |

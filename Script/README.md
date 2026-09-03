@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.4.0**
+**Current version: 1.5.0**
 
 It brings the device-side and Intune-side parts of the lab workflow into one script. You can use it to export the genuine TPM-backed DeviceLink identity package produced by Windows, import that package into Intune, follow the association to the device, inspect its local UEFI markers and collect redacted evidence when something fails.
 
@@ -83,17 +83,24 @@ Options such as group tag, assigned user, assigned computer name, adding a devic
 
 The exact requirements can change as Microsoft updates Device Association. Check Microsoft's current documentation before testing.
 
-For the complete device-side flow, expect to need:
+Microsoft's documented requirements for Device Association ([reference](https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements)):
 
-- Supported physical Windows 11 hardware with a healthy, enabled TPM 2.0.
-- A Windows build and updates that support Autopilot Device Association.
+- A **physical device**. Virtual machines are not supported.
+- **Windows 11 24H2** (`26100.9278`) or **25H2** (`26200.9278`) with **KB5120998** or later.
+- A supported edition: Pro, Pro Education, Pro for Workstations, Enterprise, Education, or Enterprise LTSC.
+- **TPM 2.0**, enabled and in a good state, not in Reduced Functionality Mode. TPM attestation is enforced during association.
+- UEFI firmware, since the association is stored in a UEFI variable.
+- HTTPS to `ztd.dds.microsoft.com` and the `peapdamaa*.attest.azure.net` endpoints, on top of the baseline device-preparation networking requirements.
+- An Intune tenant with a Device Preparation policy, and suitable Intune RBAC.
 - An elevated 64-bit PowerShell session, or a SYSTEM context where appropriate.
-- Internet access to Microsoft identity, Graph, Intune enrollment and attestation services.
-- An Intune tenant configured for Windows Autopilot Device Preparation.
-- Delegated Microsoft Graph consent and suitable Intune RBAC for the default interactive path, or a custom Entra app registration for custom or unattended authentication.
-- A Device Preparation policy when importing a new Device Association record.
 
+Run `-Action CheckRequirements` to verify most of these against the local machine before you start:
+
+```powershell
+.\Get-AutopilotDeviceAssociation.ps1 -Action CheckRequirements -Online
+```
 The script has been parsed and tested with Windows PowerShell 5.1 and PowerShell 7.6. The tests use local Graph and firmware substitutes; they do not prove that every Windows build or tenant exposes the same beta behavior.
+
 
 `Inspect` can run without elevation or Graph access. `ReadAssociation` and local removal need access to UEFI variables and therefore must run elevated. Export and native association are intended for the supported Windows OOBE scenario.
 
@@ -295,6 +302,15 @@ After Graph accepts the POST, the script requires a returned association-record 
   -Verbose
 ```
 
+### Check whether this device qualifies
+
+```powershell
+.\Get-AutopilotDeviceAssociation.ps1 -Action CheckRequirements
+
+# add -Online to also test the required Microsoft endpoints
+.\Get-AutopilotDeviceAssociation.ps1 -Action CheckRequirements -Online
+```
+
 ### Read the local UEFI markers
 
 ```powershell
@@ -349,6 +365,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 
 | Action | Steps | Network | Changes state |
 |---|---:|---|---|
+| `CheckRequirements` | 1 | No (or endpoint tests with `-Online`) | No; verifies the documented Device Association requirements. |
 | `Inspect` | 1 | No | No; reads and decodes the selected CSV. |
 | `Export` | 2 | Native Windows behavior | Creates a CSV, then inspects it. |
 | `Upload` | 3 | Microsoft identity and Graph | Imports the supplied identity and polls its association state. |
@@ -368,7 +385,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 
 | Parameter | Purpose | Default |
 |---|---|---|
-| `-Action` | Selects `Full`, `Sync`, `Export`, `Inspect`, `Upload`, `Discover`, `Link`, `ReadAssociation` or `RemoveAssociation`. | `Full` |
+| `-Action` | Selects `Full`, `Sync`, `Export`, `Inspect`, `Upload`, `Discover`, `Link`, `ReadAssociation`, `RemoveAssociation` or `CheckRequirements`. | `Full` |
 | `-Online` | Uses `Upload` when `-Action` is omitted. If `-Action` is supplied, the explicit action takes precedence. | Disabled |
 | `-Version` | Prints the toolkit version and exits without creating a work folder or log. | Disabled |
 | `-CsvPath` | Path to an existing `*.devicelink.csv`. | Newest CSV in `WorkFolder` where supported by the action. |
@@ -684,6 +701,14 @@ No real Graph mutation, UEFI deletion, TPM change, Intune deletion or Entra dele
 The package also contains exact pre-change script snapshots for comparison and rollback.
 
 ## Version history
+
+### 1.5.0
+
+- Added `-Action CheckRequirements`, which verifies the [documented Device Association requirements](https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements) against the local machine.
+- Checks: physical device (virtual machines are not supported), 64-bit Windows 11 client, a supported build (24H2 `26100.9278` or 25H2 `26200.9278`, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, Secure Boot, and whether the TPM has recently refused to create the `DEVICEASSOCIATION_TACK_RSA` key.
+- `-Online` additionally tests TCP 443 to `ztd.dds.microsoft.com` and the thirteen `attest.azure.net` endpoints.
+- `Export`, `Sync`, `Discover`, `Link` and `Full` now run the same check as a **non-blocking** preflight and warn when the device does not qualify.
+- Checks that need elevation report `Unknown` rather than a false failure, and the report says so.
 
 ### 1.4.0
 
