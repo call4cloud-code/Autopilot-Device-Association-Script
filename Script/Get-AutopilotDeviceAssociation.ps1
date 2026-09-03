@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.5.0
+.VERSION 1.6.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,7 +7,8 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
-Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions run the same check first and, when the device does not qualify, list the failures and ask before continuing; -Force skips the prompt and a host that cannot prompt stops instead of proceeding. Native HRESULTs such as 0x80004001 (E_NOTIMPL, build too old) and 0x8103C00F (no attestation material) now carry a plain-language hint.
+Version 1.6.0 makes the requirements preflight ask before continuing: Export, Sync, Discover, Link and Full now list the unmet requirements and prompt, -Force skips the prompt, and a host that cannot prompt stops instead of proceeding into a confusing native error. Native DeviceLink HRESULTs also carry a plain-language hint - 0x80004001 (E_NOTIMPL, the build predates KB5120998 and has no DeviceLink API), 0x8103C00F (no attestation material), 0x80090029 and 0x80090016 (the TPM refused the association key) and 0x80070005 (not elevated).
+Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions run the same check as a non-blocking preflight and warn when the device does not qualify.
 Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged, unless -ShowClaims is added, which also prints the decoded JOSE header and payload to the console (console only; never to the diagnostic files).
 Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
 Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
@@ -130,7 +131,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.5.0'
+$DL_SCRIPT_VERSION = '1.6.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'

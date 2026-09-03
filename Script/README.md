@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.5.0**
+**Current version: 1.6.0**
 
 It brings the device-side and Intune-side parts of the lab workflow into one script. You can use it to export the genuine TPM-backed DeviceLink identity package produced by Windows, import that package into Intune, follow the association to the device, inspect its local UEFI markers and collect redacted evidence when something fails.
 
@@ -717,13 +717,17 @@ The package also contains exact pre-change script snapshots for comparison and r
 
 ## Version history
 
+### 1.6.0
+
+- The requirements preflight now **asks before continuing**. `Export`, `Sync`, `Discover`, `Link` and `Full` list the unmet requirements and prompt; `-Force` skips the prompt, and a host that cannot prompt stops rather than proceeding into a confusing native error.
+- Added `-Force`.
+- Native DeviceLink HRESULTs carry a plain-language hint: `0x80004001` (E_NOTIMPL - the build predates KB5120998 and has no DeviceLink API), `0x8103C00F` (no attestation material), `0x80090029` / `0x80090016` (the TPM refused the association key), `0x80070005` (not elevated).
+
 ### 1.5.0
 
 - Added `-Action CheckRequirements`, which verifies the [documented Device Association requirements](https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements) against the local machine.
 - Checks: physical device (virtual machines are not supported), 64-bit Windows 11 client, a supported build (24H2 `26100.9278` or 25H2 `26200.9278`, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, Secure Boot, and whether the TPM has recently refused to create the `DEVICEASSOCIATION_TACK_RSA` key.
 - `-Online` additionally tests TCP 443 to `ztd.dds.microsoft.com` and the thirteen `attest.azure.net` endpoints.
-- `Export`, `Sync`, `Discover`, `Link` and `Full` run the same check first. When the device does not qualify they list the failures and **ask before continuing**; `-Force` skips the prompt, and a host that cannot prompt stops rather than proceeding into a confusing native error.
-- Native HRESULTs now carry a plain-language hint: `0x80004001` (E_NOTIMPL - the build predates KB5120998 and has no DeviceLink API), `0x8103C00F` (no attestation material), `0x80090029` (the TPM refused the association key), `0x80070005` (not elevated).
 - A Windows build newer than the documented releases is reported as a warning, not a failure: it already supersedes KB5120998, so it is treated as untested rather than unsupported. New releases are added by editing the `$DL_REQ_BUILDS` table.
 - Checks that need elevation report `Unknown` rather than a false failure, and the report says so.
 
