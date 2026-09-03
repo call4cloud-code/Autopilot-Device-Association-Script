@@ -33,8 +33,8 @@ Get-AutopilotDeviceAssociation -Action Full
 # 3. Is the association real, in date, and bound to this machine?
 Get-AutopilotDeviceAssociation -Action ReadAssociation -Validate -Online
 
-# 4. Take it off again, locally and in Intune
-Get-AutopilotDeviceAssociation -Action RemoveAssociation -DeleteCloudAssociation -WhatIf
+# 4. Take it off again - UEFI and the Intune record
+Get-AutopilotDeviceAssociation -Action RemoveAssociation -WhatIf
 ```
 
 `-Action` defaults to `Full`, so a bare `Get-AutopilotDeviceAssociation` runs the whole pipeline.
@@ -67,7 +67,9 @@ Device-code sign-in is the default — nothing to configure, and the token never
 
 ## Removing an association
 
-Local removal reads every known variable first and stops without touching anything if any read fails, deletes only what is present, then reads each one back and fails if anything survived. `-DeleteCloudAssociation` requires **exactly one** matching Intune record and only deletes it after local removal is verified.
+`RemoveAssociation` clears the local UEFI variables **and** deletes the matching Intune record. Add `-KeepCloudAssociation` (alias `-LocalOnly`) to clear UEFI only.
+
+Local removal reads every known variable first and stops without touching anything if any read fails, deletes only what is present, then reads each one back and fails if anything survived. The cloud record must match this computer **exactly and uniquely**, and is deleted only after local removal is verified.
 
 > Removal does **not** unenroll the device, clear the TPM, or delete the Intune managed-device or Entra objects. If the machine is still MDM-managed, its provider can associate it again.
 
