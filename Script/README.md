@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.7.0**
+**Current version: 1.8.0**
 
 Short version for PowerShell Gallery visitors: [GALLERY.md](../GALLERY.md)
 
@@ -29,6 +29,7 @@ The technical background and complete 12-step flow are explained in the Patch My
 - [Inspecting a DeviceLink CSV](#inspecting-a-devicelink-csv)
 - [Reading and removing the UEFI association](#reading-and-removing-the-uefi-association)
 - [Removing the Intune Device Association record](#removing-the-intune-device-association-record)
+- [Exit codes](#exit-codes)
 - [Logging and evidence](#logging-and-evidence)
 - [Troubleshooting](#troubleshooting)
 - [Security and behavior boundaries](#security-and-behavior-boundaries)
@@ -385,7 +386,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `Sync` | 4 | Native Windows behavior, Microsoft identity and Graph | Exports, imports and waits for pre-association. |
 | `Discover` | 2 | Native Windows DeviceLink traffic | Requests tenant discovery without applying the association. |
 | `Link` | 2 | Native Windows DeviceLink traffic | Discovers and applies the association. |
-| `Full` | 5 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers and applies. |
+| `Full` | 6 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers, applies, then confirms the service reports `associated`. |
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
 | `ReadAssociation -Validate` | 2 | No (offline) | No; also decodes and checks the `DeviceLinkJwtCompressed` token. |
 | `ReadAssociation -Validate -Online` | 2 | Issuer metadata / JWKS (anonymous) | No; adds RS256 signature verification of the token. |
@@ -555,6 +556,16 @@ The endpoint was confirmed in the supplied Intune portal HAR. The portal used th
 
 If the association record contains a `managedDeviceId`, the script warns that the computer is still enrolled. Removing the Device Association record does not remove that managed device. If the device remains MDM-enrolled, its provider can attempt to associate it again.
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The action completed. |
+| `1` | The action failed. |
+| `2` | The device does not meet the documented requirements: either `CheckRequirements` found unmet requirements, or a device-side action was stopped by the preflight. |
+
+This makes the script usable from a task sequence or an Intune script, where `CheckRequirements` returning `0` on a device that cannot associate would be actively misleading.
+
 ## Logging and evidence
 
 Without `-Verbose`, the console shows the action plan, current step, selected policy name, Microsoft device-login message, high-level waiting status and final result. Informational event names, timestamps, HTTP progress, polling states and full returned records remain off the console. Errors are reduced to one final readable message where the action terminates.
@@ -706,6 +717,11 @@ No real Graph mutation, UEFI deletion, TPM change, Intune deletion or Entra dele
 The package also contains exact pre-change script snapshots for comparison and rollback.
 
 ## Version history
+
+### 1.8.0
+
+- **Meaningful exit codes**: `0` success, `1` error, `2` the device does not meet the requirements. `CheckRequirements` and a preflight stop previously both returned `0`, so a caller could not tell a qualifying device from one that cannot associate at all.
+- `Full` gained a sixth step that polls Intune until the record reports `associated`, so a successful client-side link is **confirmed against the service** rather than assumed. If the link did not succeed the step is skipped, and if the service has not caught up before `-TimeoutSec` it says so rather than failing.
 
 ### 1.7.0
 

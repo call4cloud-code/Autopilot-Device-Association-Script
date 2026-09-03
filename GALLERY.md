@@ -84,6 +84,10 @@ Every run writes a redacted diagnostic folder under `C:\ProgramData\DeviceLink\L
 | `0x80090029` | The TPM refused to create the association key. Usually needs an OEM TPM firmware update. |
 | `0x80070005` | Not elevated. |
 
+## Exit codes
+
+`0` success, `1` error, `2` the device does not meet the requirements - so `CheckRequirements` is usable as a gate in a task sequence.
+
 ## Deliberate limits
 
 It never fabricates, edits or re-signs an identity — the exported `Data` value is uploaded byte for byte. HTTP mutations have **zero** automatic retries. It does not make a virtual machine into supported hardware, does not intercept Windows' own DeviceLink traffic, and targets Microsoft Graph **beta**, whose contracts change.

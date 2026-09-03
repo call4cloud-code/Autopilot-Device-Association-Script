@@ -315,7 +315,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `Sync` | 4 | Native Windows behavior, Microsoft identity and Graph | Exports, imports and waits for pre-association. |
 | `Discover` | 2 | Native Windows DeviceLink traffic | Requests tenant discovery without applying the association. |
 | `Link` | 2 | Native Windows DeviceLink traffic | Discovers and applies the association. |
-| `Full` | 5 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers and applies. |
+| `Full` | 6 | Native Windows behavior, Microsoft identity and Graph | Exports, imports, waits, discovers, applies, then confirms the service reports `associated`. |
 | `CheckRequirements` | 1 | No (or endpoint tests with `-Online`) | No; verifies the documented Device Association requirements. |
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
 | `ReadAssociation -Validate` | 2 | Optional (`-Online`: issuer JWKS, anonymous) | No; decodes and checks the `DeviceLinkJwtCompressed` token, optionally verifying its RS256 signature. |

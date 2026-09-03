@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.7.0
+.VERSION 1.8.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.8.0 gives the script meaningful exit codes - 0 success, 1 error, 2 the device does not meet the requirements - so CheckRequirements and a preflight stop no longer report success to a caller. Full also gains a sixth step that polls Intune until the record reports associated, so a successful client-side link is confirmed against the service instead of being assumed.
 Version 1.7.0 makes RemoveAssociation remove the Intune Device Association record as well as the local UEFI variables by default. Use -KeepCloudAssociation (alias -LocalOnly) to clear UEFI only. -DeleteCloudAssociation is still accepted and is now a no-op, because it describes the default. The safety rules are unchanged: the cloud record must match this computer exactly and uniquely, and it is deleted only after local UEFI removal has been verified.
 Version 1.6.1 replaces the raw PowerShell exception shown when the preflight stops a run with a readable summary of what is not met, how to fix it and how to override, and no longer records that clean stop as a failed run.
 Version 1.6.0 makes the requirements preflight ask before continuing: Export, Sync, Discover, Link and Full now list the unmet requirements and prompt, -Force skips the prompt, and a host that cannot prompt stops instead of proceeding into a confusing native error. Native DeviceLink HRESULTs also carry a plain-language hint - 0x80004001 (E_NOTIMPL, the build predates KB5120998 and has no DeviceLink API), 0x8103C00F (no attestation material), 0x80090029 and 0x80090016 (the TPM refused the association key) and 0x80070005 (not elevated).
@@ -79,6 +80,8 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
     Microsoft Graph beta endpoints that can change, and removal changes UEFI state. Test
     it before using it in an operational workflow.
 .NOTES
+    Exit codes: 0 = success, 1 = error, 2 = the device does not meet the documented requirements.
+
     Native association is intended for the Device Association OOBE flow. A missing maaJwt
     response indicates missing attestation material; HRESULT 0x8103C00F alone does not prove
     its cause. This logger captures this script's REST calls, not Windows' internal traffic.
@@ -166,7 +169,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.7.0'
+$DL_SCRIPT_VERSION = '1.8.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -338,7 +341,7 @@ function Get-DLActionPlan([string]$SelectedAction) {
         'Sync'              { @('Ask Windows to export a genuine DeviceLink CSV','Read the exported identity package','Submit the device import to Intune','Wait for the pre-associated state') }
         'Discover'          { @('Load the DeviceLink identity package','Ask Windows to discover the tenant association') }
         'Link'              { @('Load the DeviceLink identity package','Discover and apply the tenant association') }
-        'Full'              { @('Ask Windows to export a genuine DeviceLink CSV','Inspect and load the exported identity package','Submit the device import to Intune','Wait for the pre-associated state','Discover and apply the tenant association') }
+        'Full'              { @('Ask Windows to export a genuine DeviceLink CSV','Inspect and load the exported identity package','Submit the device import to Intune','Wait for the pre-associated state','Discover and apply the tenant association','Confirm that Intune reports the device as associated') }
         default             { throw "No step plan is defined for action '$SelectedAction'." }
     }
 }
@@ -874,6 +877,7 @@ function Remove-DLFirmwareAssociation {
 Initialize-DLLogging
 $script:DLRunSucceeded = $false
 $script:DLStoppedByPreflight = $false
+$script:DLExitCode = 0
 try {
 if ($InteractiveLogin -and ($ClientSecret -or $CertificateThumbprint)) {
     throw '-InteractiveLogin cannot be combined with -ClientSecret or -CertificateThumbprint.'
@@ -1520,6 +1524,41 @@ function Invoke-Upload([string]$b64) {
     }
     $resp
 }
+function Wait-DLAssociated([string]$id, [int]$sec) {
+    if ([string]::IsNullOrWhiteSpace($id)) {
+        Write-DLLog 'AssociationConfirmSkipped' 'No Device Association record ID is available, so the service-side result was not confirmed.' @{ Confirmed = $false } 'WARN'
+        return 'NotChecked'
+    }
+    Add-DLRedaction $id
+    $H = Graph-Headers
+    $deadline = (Get-Date).AddSeconds($sec)
+    Write-Host 'Confirming that Intune reports the device as associated...' -ForegroundColor DarkGray
+    Write-DLLog 'AssociationConfirmStart' 'Polling the record until the service reports associated.' @{ DeviceRecordId = $id; TimeoutSeconds = $sec }
+    $attempt = 0
+    $lastState = $null
+    do {
+        $attempt++
+        try {
+            $d = Invoke-DLRestMethod -Operation 'ConfirmAssociationState' -Headers $H -Uri "$GraphBase/deviceManagement/tenantAssociatedDevices/$id"
+            $lastState = [string]$d.associationState
+            Write-DLVerboseLog 'AssociationConfirmPoll' "The service reports $lastState (attempt $attempt)." @{ Attempt = $attempt; AssociationState = $lastState }
+            if ($lastState -ieq 'associated') {
+                Write-DLLog 'AssociationConfirmed' 'Intune reports the device as associated.' @{ Attempt = $attempt; AssociationState = $lastState }
+                return 'associated'
+            }
+        } catch {
+            if ($_.Exception.Data['HttpStatusCode'] -ne 404) { throw }
+            Write-DLVerboseLog 'AssociationConfirmNotFound' 'The record is not visible; polling continues.' @{ Attempt = $attempt; HttpStatus = 404 }
+        }
+        if ((Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+    } while ((Get-Date) -lt $deadline)
+
+    $stateText = if ($lastState) { $lastState } else { 'not returned' }
+    Write-DLLog 'AssociationConfirmTimeout' 'The device applied the association locally, but the service has not reported it as associated yet.' @{
+        DeviceRecordId = $id; Attempts = $attempt; LastAssociationState = $stateText; TimeoutSeconds = $sec
+    } 'WARN'
+    return $stateText
+}
 function Show-LinkResult([string]$raw, [bool]$discoverOnly) {
     $discoveryResultNames = @{0='Undefined';1='SuccessfullyRetrievedUrl';2='SuccessfullyRetrievedUrlAndReceivedRedirection';3='FailedToRetrieveUrl_NotPreAssociated';4='FailedToRetrieveUrl_NetworkConnectionFailure'}
     $configureResultNames = @{0='Undefined';1='SuccessfullyAppliedLink';2='FailedTpmInitialization';3='FailedDiscovery';4='FailedToTpmAttest';5='FailedToMaaAttest';6='FailedToRetrieveDeviceLinkFromUrl';7='FailedToRetrieveDeviceLinkFromRedirectedUrl';8='FailedToApplyDeviceLinkToDevice';9='FailedToAcknowledgeDeviceLink'}
@@ -1545,14 +1584,17 @@ function Show-LinkResult([string]$raw, [bool]$discoverOnly) {
     }
     if ($VerbosePreference -ne 'SilentlyContinue') { $summary | Format-List | Out-Host }
     if ($discoverOnly) {
+        # discovery only: nothing was applied
         Write-Host ("Discovery result: {0}" -f $summary.DiscoveryResult) -ForegroundColor $(if ($dr -in 1,2) {'Green'} else {'Yellow'})
         return
     }
     if ($cr -eq 1 -and $hrOk) {
         Write-Host 'Device association applied successfully.' -ForegroundColor Green
         Write-DLLog 'AssociationCompleted' 'The native operation reports SuccessfullyAppliedLink. Enrollment is a later operation.' @{ Result=$cr; HResult=$kv.configureHResult }
+        return $true
     } else {
         Write-DLLog 'AssociationNotConfirmed' 'No successful association result was returned. An HRESULT of zero alone does not establish association success.' @{ Result=$cr; ResultText=$crText; HResult=$kv.configureHResult } 'ERROR'
+        return $false
     }
 }
 
@@ -2119,6 +2161,7 @@ function Invoke-DLRequirementsPreflight {
     Write-DLLog 'RunStoppedByPreflight' 'Stopped before touching the device because the documented requirements are not met.' `
         ($logData + @{ Continued = $false; Prompted = $prompted }) 'WARN' -NoHost
     $script:DLStoppedByPreflight = $true
+    $script:DLExitCode = 2
     return $false
 }
 
@@ -2145,6 +2188,7 @@ switch ($Action) {
           Write-Host 'Checking the documented Windows Autopilot Device Association requirements...' -ForegroundColor DarkGray
           $report = Test-DLDeviceRequirements -IncludeEndpoints:$Online
           Write-DLRequirementsReport $report
+          if (-not $report.Supported) { $script:DLExitCode = 2 }
           if (-not $report.Supported) {
               Write-Host 'Requirements reference: https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements' -ForegroundColor DarkGray
           }
@@ -2241,7 +2285,7 @@ switch ($Action) {
 
 
   'Export' {
-      if (-not (Invoke-DLRequirementsPreflight)) { return }
+      if (-not (Invoke-DLRequirementsPreflight)) { exit $script:DLExitCode }
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       Invoke-DLStep 2 { Invoke-Inspect $csv | Out-Host } | Out-Null
@@ -2272,7 +2316,7 @@ switch ($Action) {
   }
 
   'Sync' {
-      if (-not (Invoke-DLRequirementsPreflight)) { return }
+      if (-not (Invoke-DLRequirementsPreflight)) { exit $script:DLExitCode }
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       $blob = Invoke-DLStep 2 { Get-BlobFromCsv $csv }
@@ -2282,7 +2326,7 @@ switch ($Action) {
   }
 
   'Discover' {
-      if (-not (Invoke-DLRequirementsPreflight)) { return }
+      if (-not (Invoke-DLRequirementsPreflight)) { exit $script:DLExitCode }
       $blob = Invoke-DLStep 1 {
           if ($DeviceLinkBase64) {
               Write-DLVerboseLog 'InputSelection' 'Using the DeviceLinkBase64 value supplied by the caller.' @{ Source='DeviceLinkBase64 parameter'; Characters=$DeviceLinkBase64.Length; RawValueLogged=$false }
@@ -2296,7 +2340,7 @@ switch ($Action) {
   }
 
   'Link' {
-      if (-not (Invoke-DLRequirementsPreflight)) { return }
+      if (-not (Invoke-DLRequirementsPreflight)) { exit $script:DLExitCode }
       $blob = Invoke-DLStep 1 {
           if ($DeviceLinkBase64) {
               Write-DLVerboseLog 'InputSelection' 'Using the DeviceLinkBase64 value supplied by the caller.' @{ Source='DeviceLinkBase64 parameter'; Characters=$DeviceLinkBase64.Length; RawValueLogged=$false }
@@ -2310,7 +2354,7 @@ switch ($Action) {
   }
 
   'Full' {
-      if (-not (Invoke-DLRequirementsPreflight)) { return }
+      if (-not (Invoke-DLRequirementsPreflight)) { exit $script:DLExitCode }
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       $b = Invoke-DLStep 2 {
@@ -2321,7 +2365,20 @@ switch ($Action) {
       $state = Invoke-DLStep 4 { Wait-PreAssociated $r.id $TimeoutSec }
       Write-Host "Pre-associated ($state)." -ForegroundColor Green
       Write-Host "`nLinking device ..." -ForegroundColor Cyan
-      Invoke-DLStep 5 { Show-LinkResult (Invoke-DLLink $b $false) $false }
+      $linked = Invoke-DLStep 5 { Show-LinkResult (Invoke-DLLink $b $false) $false }
+      Invoke-DLStep 6 {
+          if (-not $linked) {
+              Write-DLLog 'AssociationConfirmSkipped' 'The device did not report a successful link, so the service-side state was not confirmed.' @{ Confirmed = $false } 'WARN'
+              Write-Host 'Skipped: the device did not report a successful link.' -ForegroundColor Yellow
+              return
+          }
+          $final = Wait-DLAssociated $r.id $TimeoutSec
+          if ($final -eq 'associated') {
+              Write-Host 'Intune reports this device as associated.' -ForegroundColor Green
+          } else {
+              Write-Host "The device applied the association, but Intune still reports '$final'. It can take a little longer to catch up; re-check with -Action ReadAssociation -Validate -Online." -ForegroundColor Yellow
+          }
+      } | Out-Null
   }
 }
 
@@ -2337,9 +2394,13 @@ Write-DLLog 'RunCompleted' 'The selected action finished. Review operation resul
         ErrorId=$_.FullyQualifiedErrorId; ErrorCategory=$_.CategoryInfo.Category.ToString(); Line=$_.InvocationInfo.ScriptLineNumber
         ScriptStackTrace=(Protect-DLText $_.ScriptStackTrace)
     } 'ERROR'
+    $script:DLExitCode = 1
     # Do not rethrow a raw web exception whose ErrorDetails may contain echoed secrets.
     throw [Exception]::new($safe)
 } finally {
     Write-DLLog 'RunEnd' 'Diagnostic capture finished.' @{ Completed=$script:DLRunSucceeded; StoppedByPreflight=$script:DLStoppedByPreflight; LogWriteFailed=$script:DLLogWriteFailed }
     Write-Host "Diagnostic logs: $script:DLRunFolder" -ForegroundColor Cyan
 }
+
+# Exit codes: 0 success, 1 error, 2 the device does not meet the requirements.
+if ($script:DLExitCode -ne 0) { exit $script:DLExitCode }
