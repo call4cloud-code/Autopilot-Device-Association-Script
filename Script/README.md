@@ -419,6 +419,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-FirstPolicy` | Explicitly selects the first applicable policy returned by Graph. Retained for compatibility because this is now the default. | Disabled |
 | `-DeleteCloudAssociation` | After verified local removal, deletes the matched Intune Device Association record. Valid only with `RemoveAssociation`. | Disabled |
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
+| `-Force` | Continue even when the requirements preflight reports that the device does not qualify. Without it, an interactive session is asked to confirm and a non-interactive session stops. | Disabled |
 | `-Validate` | With `ReadAssociation`: decode `DeviceLinkJwtCompressed` and check it is a well-formed RS256 JWT, inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and (with `-TenantId`) a matching tenant and device inventory. Add `-Online` to also verify the RS256 signature against the issuer's published key. Reports booleans, timestamps and the signing-key thumbprint only. | Disabled |
 | `-ShowClaims` | With `-Validate`: also print the decoded JOSE header and full payload claims to the console. Console only; the claim values are never written to the diagnostic files. | Disabled |
 | `-GraphBase` | Microsoft Graph base URL. Mainly useful for testing. | `https://graph.microsoft.com/beta` |
@@ -721,7 +722,8 @@ The package also contains exact pre-change script snapshots for comparison and r
 - Added `-Action CheckRequirements`, which verifies the [documented Device Association requirements](https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements) against the local machine.
 - Checks: physical device (virtual machines are not supported), 64-bit Windows 11 client, a supported build (24H2 `26100.9278` or 25H2 `26200.9278`, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, Secure Boot, and whether the TPM has recently refused to create the `DEVICEASSOCIATION_TACK_RSA` key.
 - `-Online` additionally tests TCP 443 to `ztd.dds.microsoft.com` and the thirteen `attest.azure.net` endpoints.
-- `Export`, `Sync`, `Discover`, `Link` and `Full` now run the same check as a **non-blocking** preflight and warn when the device does not qualify.
+- `Export`, `Sync`, `Discover`, `Link` and `Full` run the same check first. When the device does not qualify they list the failures and **ask before continuing**; `-Force` skips the prompt, and a host that cannot prompt stops rather than proceeding into a confusing native error.
+- Native HRESULTs now carry a plain-language hint: `0x80004001` (E_NOTIMPL - the build predates KB5120998 and has no DeviceLink API), `0x8103C00F` (no attestation material), `0x80090029` (the TPM refused the association key), `0x80070005` (not elevated).
 - A Windows build newer than the documented releases is reported as a warning, not a failure: it already supersedes KB5120998, so it is treated as untested rather than unsupported. New releases are added by editing the `$DL_REQ_BUILDS` table.
 - Checks that need elevation report `Unknown` rather than a false failure, and the report says so.
 

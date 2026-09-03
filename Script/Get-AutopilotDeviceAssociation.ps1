@@ -7,7 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
-Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions now run the same check as a non-blocking preflight and warn when the device does not qualify.
+Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions run the same check first and, when the device does not qualify, list the failures and ask before continuing; -Force skips the prompt and a host that cannot prompt stops instead of proceeding. Native HRESULTs such as 0x80004001 (E_NOTIMPL, build too old) and 0x8103C00F (no attestation material) now carry a plain-language hint.
 Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged, unless -ShowClaims is added, which also prints the decoded JOSE header and payload to the console (console only; never to the diagnostic files).
 Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
 Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
@@ -68,6 +68,7 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 .PARAMETER Verbose       add safe substep, decision, timing and HTTP metadata to the console; diagnostic files are always written
 .PARAMETER DeleteCloudAssociation  after verified UEFI removal, delete the matching Intune Device Association record
 .PARAMETER TenantAssociatedDeviceId optional exact Intune Device Association record ID; it must still match this computer
+.PARAMETER Force         continue even when the requirements preflight reports that this device does not qualify
 .PARAMETER Validate      with -Action ReadAssociation: decode DeviceLinkJwtCompressed and check it is well-formed, in its iat/exp window, bound to this device and (with -Online) signed by its issuer's published key. Reports booleans and timestamps only; never the token or identity values.
 .PARAMETER ShowClaims    with -Validate: also print the decoded JOSE header and full payload claims to the console. Console only; the claim values are never written to the diagnostic files. Treat screen sharing and console capture accordingly.
 
@@ -118,6 +119,7 @@ param(
     [string] $TenantAssociatedDeviceId,
 
     [switch] $Validate,
+    [switch] $Force,
     [switch] $ShowClaims,
 
     [string] $DevicePreparationPolicyId,
@@ -593,7 +595,8 @@ function Invoke-DLExport {
         Format=$Format; WorkFolder=$WorkFolder; TimeoutSeconds=$TimeoutSec; ExistingCsvCount=@(Get-ChildItem $WorkFolder -Filter *.devicelink.csv -ErrorAction SilentlyContinue).Count
     }
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    $path = [DLKit2.Native]::ExportCsv($WorkFolder, $Format, $TimeoutSec)
+    try { $path = [DLKit2.Native]::ExportCsv($WorkFolder, $Format, $TimeoutSec) }
+    catch { throw (Get-DLNativeErrorHint $_.Exception.Message) }
     $timer.Stop()
     Write-DLLog 'ExportComplete' 'Windows returned an exported CSV.' @{ CsvFile=[IO.Path]::GetFileName($path); ElapsedMilliseconds=$timer.ElapsedMilliseconds }
     Write-DLVerboseLog 'ExportResult' 'Windows completed the DeviceLink export.' @{
@@ -609,7 +612,8 @@ function Invoke-DLLink([string]$Base64, [bool]$DiscoverOnly) {
         NativeTrafficCapturedByRestLogger=$false
     }
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    $result = [DLKit2.Native]::Link($Base64, $DiscoverOnly, $TimeoutSec)
+    try { $result = [DLKit2.Native]::Link($Base64, $DiscoverOnly, $TimeoutSec) }
+    catch { throw (Get-DLNativeErrorHint $_.Exception.Message) }
     $timer.Stop()
     Write-DLLog 'NativeAssociationResult' 'Native operation returned.' @{ Result=$result; ElapsedMilliseconds=$timer.ElapsedMilliseconds; Note='Native Windows HTTP traffic is not intercepted by this REST logger.' }
     return $result
@@ -1978,20 +1982,73 @@ function Write-DLRequirementsReport($Report) {
 
 # Non-blocking preflight used by the device-side actions.
 function Invoke-DLRequirementsPreflight {
+    $report = $null
     try {
-        $r = Test-DLDeviceRequirements
-        if (-not $r.Supported) {
-            Write-Warning "This device does not meet the documented Device Association requirements: $($r.Summary). Continuing anyway; run -Action CheckRequirements for the detail."
-            foreach ($f in $r.Failures) { Write-Warning " - $($f.Check): $($f.Detail)" }
-        }
-        Write-DLLog 'RequirementsPreflight' $r.Summary @{
-            Supported = $r.Supported
-            Failures  = @($r.Failures | Select-Object Check, Detail)
-            Blocking  = $false
-        } $(if (-not $r.Supported) { 'WARN' } else { 'INFO' })
+        $report = Test-DLDeviceRequirements
     } catch {
         Write-DLLog 'RequirementsPreflight' 'The requirements preflight could not run.' @{ Error = (Protect-DLText $_.Exception.Message) } 'WARN'
+        return
     }
+
+    if ($report.Supported) {
+        Write-DLLog 'RequirementsPreflight' $report.Summary @{ Supported = $true; Blocking = $false } 'INFO'
+        foreach ($w in $report.Warnings) { Write-Warning "$($w.Check): $($w.Detail)" }
+        return
+    }
+
+    Write-Host ''
+    Write-Warning "This device does not meet the documented Device Association requirements ($($report.Summary)):"
+    foreach ($f in $report.Failures) { Write-Warning "  - $($f.Check): $($f.Detail)" }
+
+    $logData = @{
+        Supported = $false
+        Failures  = @($report.Failures | Select-Object Check, Detail)
+    }
+
+    if ($Force) {
+        Write-DLLog 'RequirementsPreflight' 'Requirements are not met; continuing because -Force was supplied.' `
+            ($logData + @{ Continued = $true; Reason = 'Force' }) 'WARN'
+        Write-Host 'Continuing because -Force was supplied.' -ForegroundColor Yellow
+        return
+    }
+
+    # Ask. ShouldContinue throws on a host that cannot prompt, which is treated as "no".
+    $continue = $false
+    try {
+        $continue = $PSCmdlet.ShouldContinue(
+            'The operation is very likely to fail. Continue anyway?',
+            'Windows Autopilot Device Association requirements are not met')
+    } catch {
+        $continue = $false
+        Write-DLLog 'RequirementsPreflight' 'This host cannot prompt, so the run was not continued automatically.' `
+            ($logData + @{ Prompted = $false }) 'WARN'
+    }
+
+    if ($continue) {
+        Write-DLLog 'RequirementsPreflight' 'Requirements are not met; the operator chose to continue.' `
+            ($logData + @{ Continued = $true; Reason = 'Operator confirmed' }) 'WARN'
+        return
+    }
+
+    Write-DLLog 'RequirementsPreflightStopped' 'Stopped before touching the device because the documented requirements are not met.' `
+        ($logData + @{ Continued = $false }) 'ERROR'
+    throw ("Stopped: this device does not meet the documented Windows Autopilot Device Association requirements ($($report.Summary)). " +
+           "Review the list above, run -Action CheckRequirements for the full report, or re-run with -Force to continue anyway.")
+}
+
+# Turns the opaque HRESULTs the native DeviceLink APIs return into something actionable.
+function Get-DLNativeErrorHint([string]$Message) {
+    $hints = [ordered]@{
+        '0x80004001' = 'E_NOTIMPL: this Windows build does not expose the DeviceLink API. Device Association requires Windows 11 24H2 or 25H2 with KB5120998 or later. Run -Action CheckRequirements.'
+        '0x8103C00F' = 'Windows could not obtain the attestation material needed to complete the association. Check that the TPM is healthy and its firmware is current, and that the attest.azure.net endpoints are reachable. Run -Action CheckRequirements.'
+        '0x80070005' = 'Access denied. Run in an elevated 64-bit PowerShell session.'
+        '0x80090029' = 'NTE_NOT_SUPPORTED: the TPM refused to create the key Device Association requires. This is usually a TPM firmware capability problem; check for an OEM TPM firmware update.'
+        '0x80090016' = 'NTE_BAD_KEYSET: the Device Association key could not be opened or created in the TPM.'
+    }
+    foreach ($code in $hints.Keys) {
+        if ($Message -match [regex]::Escape($code)) { return ($Message + [Environment]::NewLine + $hints[$code]) }
+    }
+    return $Message
 }
 # =====================================================================  orchestrate
 $blob = $DeviceLinkBase64
