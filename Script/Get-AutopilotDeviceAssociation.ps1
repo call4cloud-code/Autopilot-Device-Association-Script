@@ -30,22 +30,52 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
       Full     - Export + Inspect + Upload + wait until preassociated + Link
 
 .DESCRIPTION
-    Get-AutopilotDeviceAssociation is a PowerShell toolkit for the whole Windows Autopilot
-    device association lifecycle. It exports the genuine TPM-backed DeviceLink identity
-    package that Windows produces (WinRT DeviceLinkUtilities), inspects that package and
-    recovers the real RSA-PSS salt length, imports the unchanged Data value into Intune
-    through the Microsoft Graph beta importTenantAssociatedDevice endpoint, polls the record
-    until it is pre-associated, runs native Windows discovery and link calls, reads the local
-    Device Link UEFI markers by hash and status only, and removes the association locally and
-    - with an explicit switch - in Intune after verified local removal.
+    One command for the whole Windows Autopilot device association lifecycle. Classic
+    Autopilot has Get-WindowsAutopilotInfo; device association did not have an equivalent.
 
-    The exported Data value is uploaded exactly as Windows produced it; the script does not
-    fabricate, alter or re-sign identities, and HTTP mutations have zero automatic retries.
-    It supports interactive device-code sign-in by default and certificate or client-secret
-    app-only authentication for unattended runs. This is a diagnostic and lab toolkit that
-    calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change;
-    test it before using it in an operational workflow.
+    Get-AutopilotDeviceAssociation asks Windows for the genuine TPM-backed DeviceLink
+    identity package (WinRT DeviceLinkUtilities), inspects it, imports the unchanged Data
+    value into Intune through the Microsoft Graph beta importTenantAssociatedDevice
+    endpoint, polls the record until it is pre-associated, then runs the native Windows
+    discovery and link calls that write the tenant-signed association into UEFI. Running
+    it with no parameters does all of that.
 
+    It also does the two things nobody had scripted:
+
+      CheckRequirements  - verifies Microsoft's documented requirements against the local
+                           machine: a physical device (virtual machines are not
+                           supported), 64-bit Windows 11 client on a supported build
+                           (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later) and
+                           edition, TPM 2.0 enabled and not in Reduced Functionality Mode,
+                           UEFI firmware and Secure Boot, and whether the TPM has been
+                           refusing to create the Device Association key. Add -Online to
+                           test the required Microsoft endpoints. The device-side actions
+                           run the same check first and ask before continuing when the
+                           device does not qualify.
+
+      ReadAssociation    - reports the known Device Link UEFI markers by status, size and
+                           SHA-256 without returning their contents. Add -Validate to
+                           decode the association token and check that it is a well-formed
+                           RS256 JWT, still inside its validity window, with a linkId
+                           matching the DeviceLinkId UEFI variable and tenant and device
+                           claims matching this machine. Add -Online to verify its
+                           signature against the issuer's published key.
+
+      RemoveAssociation  - reads every known variable before deleting anything, deletes
+                           only what is present, verifies afterwards, and with
+                           -DeleteCloudAssociation removes the matching Intune record only
+                           after local removal is verified. It does not unenroll the
+                           device or clear the TPM.
+
+    The exported Data value is uploaded exactly as Windows produced it: the script never
+    fabricates, edits or re-signs an identity, and HTTP mutations have zero automatic
+    retries. Graph actions use Microsoft device-code sign-in by default, with certificate
+    or client-secret app-only authentication available for unattended runs. Every run
+    writes a redacted diagnostic folder with one artifact per REST call.
+
+    This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and
+    Microsoft Graph beta endpoints that can change, and removal changes UEFI state. Test
+    it before using it in an operational workflow.
 .NOTES
     Native association is intended for the Device Association OOBE flow. A missing maaJwt
     response indicates missing attestation material; HRESULT 0x8103C00F alone does not prove

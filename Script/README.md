@@ -4,6 +4,8 @@
 
 **Current version: 1.6.1**
 
+Short version for PowerShell Gallery visitors: [GALLERY.md](../GALLERY.md)
+
 It brings the device-side and Intune-side parts of the lab workflow into one script. You can use it to export the genuine TPM-backed DeviceLink identity package produced by Windows, import that package into Intune, follow the association to the device, inspect its local UEFI markers and collect redacted evidence when something fails.
 
 The technical background and complete 12-step flow are explained in the Patch My PC article:

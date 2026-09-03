@@ -8,6 +8,8 @@ The technical background and complete 12-step flow are explained in the Patch My
 
 **[Windows Autopilot Device Association: the complete 12-step flow](https://patchmypc.com/blog/windows-autopilot-device-association/)**
 
+Installing from the PowerShell Gallery? Start with [GALLERY.md](./GALLERY.md).
+
 > [!IMPORTANT]
 > This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change. Test it before using it in an operational workflow. Removing an association changes UEFI state and, with the optional online switch, deletes an Intune Device Association record.
 
