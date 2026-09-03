@@ -48,7 +48,7 @@ Run `-Action CheckRequirements` and it will tell you. [Microsoft's list](https:/
 - A **physical device** — virtual machines are not supported
 - **Windows 11 24H2 (`26100.9278`)** or **25H2 (`26200.9278`)**, KB5120998 or later
 - Pro, Pro Education, Pro for Workstations, Enterprise, Education or Enterprise LTSC
-- **TPM 2.0**, enabled, not in Reduced Functionality Mode — attestation is enforced
+- **TPM 2.0** — discrete, firmware or **Microsoft Pluton** — enabled, not in Reduced Functionality Mode; attestation is enforced
 - UEFI firmware, since the association lives in a UEFI variable
 - HTTPS to `ztd.dds.microsoft.com` and the `peapdamaa*.attest.azure.net` endpoints
 - An elevated 64-bit session, and an Intune Device Preparation policy

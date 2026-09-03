@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.8.0
+.VERSION 1.8.1
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,11 +7,13 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.8.1 states that the TPM 2.0 requirement is met by a discrete, firmware or Microsoft Pluton TPM, and CheckRequirements now names which implementation the device has.
 Version 1.8.0 gives the script meaningful exit codes - 0 success, 1 error, 2 the device does not meet the requirements - so CheckRequirements and a preflight stop no longer report success to a caller. Full also gains a sixth step that polls Intune until the record reports associated, so a successful client-side link is confirmed against the service instead of being assumed.
 Version 1.7.0 makes RemoveAssociation remove the Intune Device Association record as well as the local UEFI variables by default. Use -KeepCloudAssociation (alias -LocalOnly) to clear UEFI only. -DeleteCloudAssociation is still accepted and is now a no-op, because it describes the default. The safety rules are unchanged: the cloud record must match this computer exactly and uniquely, and it is deleted only after local UEFI removal has been verified.
 Version 1.6.1 replaces the raw PowerShell exception shown when the preflight stops a run with a readable summary of what is not met, how to fix it and how to override, and no longer records that clean stop as a failed run.
 Version 1.6.0 makes the requirements preflight ask before continuing: Export, Sync, Discover, Link and Full now list the unmet requirements and prompt, -Force skips the prompt, and a host that cannot prompt stops instead of proceeding into a confusing native error. Native DeviceLink HRESULTs also carry a plain-language hint - 0x80004001 (E_NOTIMPL, the build predates KB5120998 and has no DeviceLink API), 0x8103C00F (no attestation material), 0x80090029 and 0x80090016 (the TPM refused the association key) and 0x80070005 (not elevated).
-Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions run the same check as a non-blocking preflight and warn when the device does not qualify.
+Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, a TPM 2.0 - discrete, firmware, or Microsoft Pluton -
+                           enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions run the same check as a non-blocking preflight and warn when the device does not qualify.
 Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged, unless -ShowClaims is added, which also prints the decoded JOSE header and payload to the console (console only; never to the diagnostic files).
 Version 1.3.0 renames the script and published command to Get-AutopilotDeviceAssociation and adds a .DESCRIPTION block for PowerShell Gallery publishing. Export, Inspect, Upload, Discover, Link, ReadAssociation and RemoveAssociation behaviour is unchanged; the console banner, work folder and diagnostic file names are unchanged.
 Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verbose, and selects the first returned Device Preparation policy when no policy ID or name is supplied.
@@ -48,7 +50,8 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
                            machine: a physical device (virtual machines are not
                            supported), 64-bit Windows 11 client on a supported build
                            (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later) and
-                           edition, TPM 2.0 enabled and not in Reduced Functionality Mode,
+                           edition, a TPM 2.0 - discrete, firmware, or Microsoft Pluton -
+                           enabled and not in Reduced Functionality Mode,
                            UEFI firmware and Secure Boot, and whether the TPM has been
                            refusing to create the Device Association key. Add -Online to
                            test the required Microsoft endpoints. The device-side actions
@@ -169,7 +172,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.8.0'
+$DL_SCRIPT_VERSION = '1.8.1'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -1866,6 +1869,19 @@ $DL_REQ_ENDPOINTS = @(
     'peapdamaa93.weu.attest.azure.net'
 )
 
+function Get-DLTpmFlavour([string]$ManufacturerId) {
+    switch -Regex ($ManufacturerId.Trim()) {
+        '^MSFT$'  { 'Microsoft Pluton'; break }
+        '^AMD$'   { 'AMD, Pluton on Ryzen 6000 and later'; break }
+        '^QCOM$'  { 'Qualcomm, Pluton'; break }
+        '^INTC$'  { 'Intel PTT, firmware TPM'; break }
+        '^NTC$'   { 'Nuvoton, discrete'; break }
+        '^IFX$'   { 'Infineon, discrete'; break }
+        '^STM$'   { 'STMicroelectronics, discrete'; break }
+        default    { if ($ManufacturerId.Trim()) { $ManufacturerId.Trim() } else { 'unknown vendor' } }
+    }
+}
+
 function New-DLCheck([string]$Name, [string]$State, [string]$Detail) {
     [pscustomobject][ordered]@{ Check = $Name; Result = $State; Detail = $Detail }
 }
@@ -1961,7 +1977,8 @@ function Test-DLDeviceRequirements {
         $tpm = Get-CimInstance -Namespace root/cimv2/security/microsofttpm -ClassName Win32_Tpm -ErrorAction Stop
         $spec = ([string]$tpm.SpecVersion -split ',')[0].Trim()
         if ($spec -like '2.0*') {
-            $results.Add((New-DLCheck 'TPM 2.0 present' 'Pass' "SpecVersion $spec, $($tpm.ManufacturerIdTxt) version $($tpm.ManufacturerVersion)"))
+            $flavour = Get-DLTpmFlavour ([string]$tpm.ManufacturerIdTxt)
+            $results.Add((New-DLCheck 'TPM 2.0 present' 'Pass' "SpecVersion $spec - $flavour (firmware $($tpm.ManufacturerVersion))"))
         } else {
             $results.Add((New-DLCheck 'TPM 2.0 present' 'Fail' "TPM reports SpecVersion $spec. TPM 2.0 is required."))
         }

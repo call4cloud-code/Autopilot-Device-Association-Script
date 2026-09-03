@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.8.0**
+**Current version: 1.8.1**
 
 Short version for PowerShell Gallery visitors: [GALLERY.md](../GALLERY.md)
 
@@ -90,7 +90,7 @@ Microsoft's documented requirements for Device Association ([reference](https://
 - A **physical device**. Virtual machines are not supported.
 - **Windows 11 24H2** (`26100.9278`) or **25H2** (`26200.9278`) with **KB5120998** or later.
 - A supported edition: Pro, Pro Education, Pro for Workstations, Enterprise, Education, or Enterprise LTSC.
-- **TPM 2.0**, enabled and in a good state, not in Reduced Functionality Mode. TPM attestation is enforced during association.
+- **TPM 2.0** - discrete, firmware (Intel PTT, AMD fTPM) or **Microsoft Pluton** - enabled and in a good state, not in Reduced Functionality Mode. TPM attestation is enforced during association.
 - UEFI firmware, since the association is stored in a UEFI variable.
 - HTTPS to `ztd.dds.microsoft.com` and the `peapdamaa*.attest.azure.net` endpoints, on top of the baseline device-preparation networking requirements.
 - An Intune tenant with a Device Preparation policy, and suitable Intune RBAC.
