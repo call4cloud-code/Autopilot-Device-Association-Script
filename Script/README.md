@@ -447,6 +447,7 @@ SaltLength_inSignature  : 222
 FieldMatchesSignature   : True
 ValidationScope         : Salt structure only; the inventory message digest has not been verified.
 ```
+
 The console intentionally displays selected identifiers such as serial number, SMBIOS UUID and Link ID. The saved diagnostic files redact those values. Consider screen sharing and console capture separately from file logging.
 
 ## Reading and removing the UEFI association
