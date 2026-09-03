@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.6.0**
+**Current version: 1.6.1**
 
 It brings the device-side and Intune-side parts of the lab workflow into one script. You can use it to export the genuine TPM-backed DeviceLink identity package produced by Windows, import that package into Intune, follow the association to the device, inspect its local UEFI markers and collect redacted evidence when something fails.
 
@@ -705,6 +705,12 @@ No real Graph mutation, UEFI deletion, TPM change, Intune deletion or Entra dele
 The package also contains exact pre-change script snapshots for comparison and rollback.
 
 ## Version history
+
+### 1.6.1
+
+- Replaced the raw PowerShell exception shown when the preflight stops a run with a readable summary: what is not met, how to fix it, and the two commands to get the full report or override.
+- A preflight stop is no longer recorded as a failed run, and exits with status 0.
+- The unmet requirements now appear in the confirmation prompt itself rather than being printed twice.
 
 ### 1.6.0
 

@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.6.0
+.VERSION 1.6.1
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.6.1 replaces the raw PowerShell exception shown when the preflight stops a run with a readable summary of what is not met, how to fix it and how to override, and no longer records that clean stop as a failed run.
 Version 1.6.0 makes the requirements preflight ask before continuing: Export, Sync, Discover, Link and Full now list the unmet requirements and prompt, -Force skips the prompt, and a host that cannot prompt stops instead of proceeding into a confusing native error. Native DeviceLink HRESULTs also carry a plain-language hint - 0x80004001 (E_NOTIMPL, the build predates KB5120998 and has no DeviceLink API), 0x8103C00F (no attestation material), 0x80090029 and 0x80090016 (the TPM refused the association key) and 0x80070005 (not elevated).
 Version 1.5.0 adds -Action CheckRequirements, which verifies the Microsoft-documented Device Association requirements: physical device (not a VM), 64-bit Windows 11 client, a supported build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, and whether the TPM has been refusing to create the DEVICEASSOCIATION_TACK_RSA key. Adding -Online also tests the required ztd.dds.microsoft.com and attest.azure.net endpoints. The device-side actions run the same check as a non-blocking preflight and warn when the device does not qualify.
 Version 1.4.0 adds -Action ReadAssociation -Validate: it decompresses DeviceLinkJwtCompressed, checks the token is a well-formed RS256 JWT, still inside its iat/exp window, has a linkId matching the DeviceLinkId UEFI variable, and (with -TenantId) a matching tenant and device inventory. Adding -Online resolves the issuer's published signing key and verifies the RS256 signature. Only booleans, timestamps and the signing-key thumbprint are printed or logged, unless -ShowClaims is added, which also prints the decoded JOSE header and payload to the console (console only; never to the diagnostic files).
@@ -131,7 +132,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.6.0'
+$DL_SCRIPT_VERSION = '1.6.1'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -838,6 +839,7 @@ function Remove-DLFirmwareAssociation {
 [void][IO.Directory]::CreateDirectory($WorkFolder)
 Initialize-DLLogging
 $script:DLRunSucceeded = $false
+$script:DLStoppedByPreflight = $false
 try {
 if ($InteractiveLogin -and ($ClientSecret -or $CertificateThumbprint)) {
     throw '-InteractiveLogin cannot be combined with -ClientSecret or -CertificateThumbprint.'
@@ -1982,59 +1984,101 @@ function Write-DLRequirementsReport($Report) {
 }
 
 # Non-blocking preflight used by the device-side actions.
+function Write-DLStopBanner($Report) {
+    $rule = '-' * 74
+    Write-Host ''
+    Write-Host "  $rule" -ForegroundColor DarkGray
+    Write-Host '   STOPPED' -ForegroundColor Red -NoNewline
+    Write-Host '  -  this device cannot complete a Device Association yet' -ForegroundColor White
+    Write-Host "  $rule" -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '   What is not met' -ForegroundColor White
+    foreach ($f in $Report.Failures) {
+        Write-Host "     * $($f.Check)" -ForegroundColor Yellow
+        foreach ($sentence in ($f.Detail -split '(?<=\.)\s+')) {
+            if ($sentence.Trim()) { Write-Host "       $($sentence.Trim())" -ForegroundColor Gray }
+        }
+    }
+    if ($Report.Warnings.Count) {
+        Write-Host ''
+        Write-Host '   Worth knowing' -ForegroundColor White
+        foreach ($w in $Report.Warnings) { Write-Host "     - $($w.Check): $($w.Detail)" -ForegroundColor DarkYellow }
+    }
+    Write-Host ''
+    Write-Host '   What you can do' -ForegroundColor White
+    Write-Host '     Fix the item(s) above, then run this again.' -ForegroundColor Gray
+    Write-Host ''
+    $cmds = [ordered]@{
+        "Get-AutopilotDeviceAssociation -Action CheckRequirements" = 'see the full report'
+        "Get-AutopilotDeviceAssociation -Action $Action -Force"    = 'run anyway'
+    }
+    $pad = ($cmds.Keys | Measure-Object -Property Length -Maximum).Maximum
+    foreach ($c in $cmds.Keys) {
+        Write-Host ('     ' + $c.PadRight($pad + 4)) -ForegroundColor Cyan -NoNewline
+        Write-Host $cmds[$c] -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    Write-Host '   Nothing on this device was changed.' -ForegroundColor Green
+    Write-Host "  $rule" -ForegroundColor DarkGray
+    Write-Host ''
+}
+
+# Returns $true to carry on, $false to stop the run cleanly.
 function Invoke-DLRequirementsPreflight {
     $report = $null
     try {
         $report = Test-DLDeviceRequirements
     } catch {
         Write-DLLog 'RequirementsPreflight' 'The requirements preflight could not run.' @{ Error = (Protect-DLText $_.Exception.Message) } 'WARN'
-        return
+        return $true
     }
 
     if ($report.Supported) {
         Write-DLLog 'RequirementsPreflight' $report.Summary @{ Supported = $true; Blocking = $false } 'INFO'
         foreach ($w in $report.Warnings) { Write-Warning "$($w.Check): $($w.Detail)" }
-        return
+        return $true
     }
-
-    Write-Host ''
-    Write-Warning "This device does not meet the documented Device Association requirements ($($report.Summary)):"
-    foreach ($f in $report.Failures) { Write-Warning "  - $($f.Check): $($f.Detail)" }
 
     $logData = @{
         Supported = $false
         Failures  = @($report.Failures | Select-Object Check, Detail)
     }
+    $detail = ($report.Failures | ForEach-Object { "  - $($_.Check): $($_.Detail)" }) -join [Environment]::NewLine
 
     if ($Force) {
+        Write-Host ''
+        Write-Warning "This device does not meet the documented Device Association requirements ($($report.Summary)):"
+        foreach ($f in $report.Failures) { Write-Warning "  - $($f.Check): $($f.Detail)" }
+        Write-Host '   Continuing because -Force was supplied. The operation is very likely to fail.' -ForegroundColor Yellow
         Write-DLLog 'RequirementsPreflight' 'Requirements are not met; continuing because -Force was supplied.' `
             ($logData + @{ Continued = $true; Reason = 'Force' }) 'WARN'
-        Write-Host 'Continuing because -Force was supplied.' -ForegroundColor Yellow
-        return
+        return $true
     }
 
-    # Ask. ShouldContinue throws on a host that cannot prompt, which is treated as "no".
+    # Ask, putting the detail in the prompt itself so it is not printed twice.
+    # ShouldContinue throws on a host that cannot prompt, which is treated as "no".
     $continue = $false
+    $prompted = $true
     try {
         $continue = $PSCmdlet.ShouldContinue(
-            'The operation is very likely to fail. Continue anyway?',
-            'Windows Autopilot Device Association requirements are not met')
+            ($detail + [Environment]::NewLine + [Environment]::NewLine + 'The operation is very likely to fail. Continue anyway?'),
+            "Windows Autopilot Device Association requirements are not met ($($report.Summary))")
     } catch {
         $continue = $false
-        Write-DLLog 'RequirementsPreflight' 'This host cannot prompt, so the run was not continued automatically.' `
-            ($logData + @{ Prompted = $false }) 'WARN'
+        $prompted = $false
     }
 
     if ($continue) {
         Write-DLLog 'RequirementsPreflight' 'Requirements are not met; the operator chose to continue.' `
             ($logData + @{ Continued = $true; Reason = 'Operator confirmed' }) 'WARN'
-        return
+        return $true
     }
 
-    Write-DLLog 'RequirementsPreflightStopped' 'Stopped before touching the device because the documented requirements are not met.' `
-        ($logData + @{ Continued = $false }) 'ERROR'
-    throw ("Stopped: this device does not meet the documented Windows Autopilot Device Association requirements ($($report.Summary)). " +
-           "Review the list above, run -Action CheckRequirements for the full report, or re-run with -Force to continue anyway.")
+    Write-DLStopBanner $report
+    Write-DLLog 'RunStoppedByPreflight' 'Stopped before touching the device because the documented requirements are not met.' `
+        ($logData + @{ Continued = $false; Prompted = $prompted }) 'WARN' -NoHost
+    $script:DLStoppedByPreflight = $true
+    return $false
 }
 
 # Turns the opaque HRESULTs the native DeviceLink APIs return into something actionable.
@@ -2150,7 +2194,7 @@ switch ($Action) {
 
 
   'Export' {
-      Invoke-DLRequirementsPreflight
+      if (-not (Invoke-DLRequirementsPreflight)) { return }
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       Invoke-DLStep 2 { Invoke-Inspect $csv | Out-Host } | Out-Null
@@ -2181,7 +2225,7 @@ switch ($Action) {
   }
 
   'Sync' {
-      Invoke-DLRequirementsPreflight
+      if (-not (Invoke-DLRequirementsPreflight)) { return }
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       $blob = Invoke-DLStep 2 { Get-BlobFromCsv $csv }
@@ -2191,7 +2235,7 @@ switch ($Action) {
   }
 
   'Discover' {
-      Invoke-DLRequirementsPreflight
+      if (-not (Invoke-DLRequirementsPreflight)) { return }
       $blob = Invoke-DLStep 1 {
           if ($DeviceLinkBase64) {
               Write-DLVerboseLog 'InputSelection' 'Using the DeviceLinkBase64 value supplied by the caller.' @{ Source='DeviceLinkBase64 parameter'; Characters=$DeviceLinkBase64.Length; RawValueLogged=$false }
@@ -2205,7 +2249,7 @@ switch ($Action) {
   }
 
   'Link' {
-      Invoke-DLRequirementsPreflight
+      if (-not (Invoke-DLRequirementsPreflight)) { return }
       $blob = Invoke-DLStep 1 {
           if ($DeviceLinkBase64) {
               Write-DLVerboseLog 'InputSelection' 'Using the DeviceLinkBase64 value supplied by the caller.' @{ Source='DeviceLinkBase64 parameter'; Characters=$DeviceLinkBase64.Length; RawValueLogged=$false }
@@ -2219,7 +2263,7 @@ switch ($Action) {
   }
 
   'Full' {
-      Invoke-DLRequirementsPreflight
+      if (-not (Invoke-DLRequirementsPreflight)) { return }
       $csv = Invoke-DLStep 1 { Invoke-DLExport }
       Write-Host "Exported: $csv" -ForegroundColor Green
       $b = Invoke-DLStep 2 {
@@ -2249,6 +2293,6 @@ Write-DLLog 'RunCompleted' 'The selected action finished. Review operation resul
     # Do not rethrow a raw web exception whose ErrorDetails may contain echoed secrets.
     throw [Exception]::new($safe)
 } finally {
-    Write-DLLog 'RunEnd' 'Diagnostic capture finished.' @{ Completed=$script:DLRunSucceeded; LogWriteFailed=$script:DLLogWriteFailed }
+    Write-DLLog 'RunEnd' 'Diagnostic capture finished.' @{ Completed=$script:DLRunSucceeded; StoppedByPreflight=$script:DLStoppedByPreflight; LogWriteFailed=$script:DLLogWriteFailed }
     Write-Host "Diagnostic logs: $script:DLRunFolder" -ForegroundColor Cyan
 }
