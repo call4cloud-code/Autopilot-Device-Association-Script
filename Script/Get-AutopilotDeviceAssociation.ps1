@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.8.2
+.VERSION 1.9.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.9.0 makes deleting the Intune Device Association record opt-in again. RemoveAssociation clears the local UEFI variables only; add -DeleteCloudAssociation to also delete the matching Intune record. This reverts the 1.7.0 default. -KeepCloudAssociation and its -LocalOnly alias are still accepted so commands written against 1.7.0 to 1.8.2 keep working, but they now describe the default and change nothing.
 Version 1.8.2 drops the 'TPM supports the association key' requirement check. It scanned the Crypto-NCrypt log for DEVICEASSOCIATION_TACK_RSA failures and blocked the run, but NTE_NOT_SUPPORTED against that key probe turns out to be common enough that the check produced false failures on devices that are otherwise fine. The 0x80090029 hint on a real association failure is kept.
 Version 1.8.1 states that the TPM 2.0 requirement is met by a discrete, firmware or Microsoft Pluton TPM, and CheckRequirements now names which implementation the device has.
 Version 1.8.0 gives the script meaningful exit codes - 0 success, 1 error, 2 the device does not meet the requirements - so CheckRequirements and a preflight stop no longer report success to a caller. Full also gains a sixth step that polls Intune until the record reports associated, so a successful client-side link is confirmed against the service instead of being assumed.
@@ -72,12 +73,14 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
                          is not the same as valid. Add -Online to verify the signature
                          against the issuer's published key.
 
-      RemoveAssociation  Clears the local UEFI variables and deletes the matching
-                         Intune record. It reads every known variable before deleting
+      RemoveAssociation  Clears the local UEFI variables. Add -DeleteCloudAssociation to
+                         also delete the matching Intune record. It reads every known
+                         variable before deleting
                          anything, deletes only what is present and verifies
                          afterwards. The Intune record must match this computer exactly
                          and uniquely, and is deleted only after local removal is
-                         verified. Add -KeepCloudAssociation to clear UEFI only. It
+                         verified. Add -DeleteCloudAssociation to also delete the Intune
+                         record. It
                          does not unenroll the device or clear the TPM.
 
     The device-side actions run the requirements check first and ask before continuing
@@ -119,8 +122,8 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
 .PARAMETER InteractiveLogin  explicitly select delegated device-code sign-in; retained for backward compatibility because this is now the default
 .PARAMETER DevicePreparationPolicyId | PolicyName | FirstPolicy    target APDP policy; the first returned policy is the default
 .PARAMETER Verbose       add safe substep, decision, timing and HTTP metadata to the console; diagnostic files are always written
-.PARAMETER DeleteCloudAssociation  retained for compatibility. RemoveAssociation deletes the matching Intune record by default.
-.PARAMETER KeepCloudAssociation    with RemoveAssociation: clear the local UEFI variables only and leave the Intune Device Association record in place. Alias -LocalOnly.
+.PARAMETER DeleteCloudAssociation  with RemoveAssociation: after verified UEFI removal, also delete the matching Intune Device Association record
+.PARAMETER KeepCloudAssociation    accepted for compatibility with 1.7.0-1.8.2, when cloud removal was the default. Local-only removal is the default again, so this changes nothing. Alias -LocalOnly.
 .PARAMETER TenantAssociatedDeviceId optional exact Intune Device Association record ID; it must still match this computer
 .PARAMETER Force         continue even when the requirements preflight reports that this device does not qualify
 .PARAMETER Validate      with -Action ReadAssociation: decode DeviceLinkJwtCompressed and check it is well-formed, in its iat/exp window, bound to this device and (with -Online) signed by its issuer's published key. Reports booleans and timestamps only; never the token or identity values.
@@ -169,8 +172,8 @@ param(
     [string] $CertificateThumbprint,
     [switch] $InteractiveLogin,
 
-    [switch] $DeleteCloudAssociation,          # retained for compatibility; cloud removal is now the default
-    [Alias('LocalOnly')][switch] $KeepCloudAssociation,
+    [switch] $DeleteCloudAssociation,
+    [Alias('LocalOnly')][switch] $KeepCloudAssociation,   # accepted for compatibility; local-only is the default again
     [string] $TenantAssociatedDeviceId,
 
     [switch] $Validate,
@@ -185,7 +188,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.8.2'
+$DL_SCRIPT_VERSION = '1.9.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -293,7 +296,7 @@ function Initialize-DLLogging {
         VerboseEnabled = ($VerbosePreference -ne 'SilentlyContinue')
         InputSource = $(if ($DeviceLinkBase64) {'DeviceLinkBase64 parameter'} elseif ($CsvPath) {'CsvPath parameter'} else {'Action default/discovery'})
         AuthenticationMethod = Get-DLAuthenticationMethod
-        RemovesCloudRecord = (($Action -eq 'RemoveAssociation') -and (-not $KeepCloudAssociation))
+        RemovesCloudRecord = (($Action -eq 'RemoveAssociation') -and [bool]$DeleteCloudAssociation)
         ExplicitAssociationRecordId = [bool]$TenantAssociatedDeviceId
         PolicySelection = $(if ($DevicePreparationPolicyId) {'Policy ID'} elseif ($PolicyName) {'Policy name'} elseif ($FirstPolicy) {'First policy (explicit)'} else {'First policy (default)'})
         ScriptSha256 = $(if ($PSCommandPath) { Get-DLSha256 ([IO.File]::ReadAllBytes($PSCommandPath)) } else { $null })
@@ -901,21 +904,21 @@ if ($InteractiveLogin -and ($ClientSecret -or $CertificateThumbprint)) {
 if ($InteractiveLogin -and $Action -notin 'Upload','Sync','Full','RemoveAssociation') {
     throw '-InteractiveLogin is valid only with Upload, Sync, Full or RemoveAssociation.'
 }
-if ($InteractiveLogin -and $Action -eq 'RemoveAssociation' -and $KeepCloudAssociation) {
-    throw '-InteractiveLogin has no Graph operation to authorize when RemoveAssociation uses -KeepCloudAssociation.'
+if ($InteractiveLogin -and $Action -eq 'RemoveAssociation' -and -not $DeleteCloudAssociation) {
+    throw '-InteractiveLogin has no Graph operation to authorize unless RemoveAssociation also uses -DeleteCloudAssociation.'
 }
 if ($KeepCloudAssociation -and $Action -ne 'RemoveAssociation') {
     throw '-KeepCloudAssociation is valid only with -Action RemoveAssociation.'
 }
 if ($KeepCloudAssociation -and $DeleteCloudAssociation) {
-    throw 'Choose either -KeepCloudAssociation or -DeleteCloudAssociation, not both. Cloud removal is the default.'
+    throw 'Choose either -DeleteCloudAssociation or -KeepCloudAssociation, not both. Local-only removal is the default.'
 }
 if ($DeleteCloudAssociation -and $Action -ne 'RemoveAssociation') {
     throw '-DeleteCloudAssociation is valid only with -Action RemoveAssociation.'
 }
-$RemoveCloud = ($Action -eq 'RemoveAssociation') -and (-not $KeepCloudAssociation)
+$RemoveCloud = ($Action -eq 'RemoveAssociation') -and [bool]$DeleteCloudAssociation
 if ($TenantAssociatedDeviceId -and -not $RemoveCloud) {
-    throw '-TenantAssociatedDeviceId applies to the Intune record, which -KeepCloudAssociation excludes.'
+    throw '-TenantAssociatedDeviceId applies to the Intune record, so it needs -DeleteCloudAssociation.'
 }
 if ($Validate -and $Action -ne 'ReadAssociation') {
     throw '-Validate is valid only with -Action ReadAssociation.'
@@ -2231,9 +2234,9 @@ switch ($Action) {
   'RemoveAssociation' {
       if ($RemoveCloud) {
           Write-Host 'Removing the association from UEFI AND deleting the matching Intune record.' -ForegroundColor Yellow
-          Write-Host 'Use -KeepCloudAssociation (or -LocalOnly) to clear UEFI only.' -ForegroundColor DarkGray
+          Write-Host 'The Intune record is deleted because -DeleteCloudAssociation was supplied.' -ForegroundColor DarkGray
       } else {
-          Write-Host 'Removing the association from UEFI only. The Intune record is kept.' -ForegroundColor DarkGray
+          Write-Host 'Removing the association from UEFI only. Add -DeleteCloudAssociation to also delete the Intune record.' -ForegroundColor DarkGray
       }
       $cloudTarget = $null
       $cloudHeaders = $null

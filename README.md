@@ -11,7 +11,7 @@ The technical background and complete 12-step flow are explained in the Patch My
 Installing from the PowerShell Gallery? Start with [GALLERY.md](./GALLERY.md).
 
 > [!IMPORTANT]
-> This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change. Test it before using it in an operational workflow. Removing an association changes UEFI state and, by default, also deletes the Intune Device Association record.
+> This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change. Test it before using it in an operational workflow. Removing an association changes UEFI state and, with the explicit online switch, deletes an Intune Device Association record.
 
 ## Contents
 
@@ -319,8 +319,8 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `CheckRequirements` | 1 | No (or endpoint tests with `-Online`) | No; verifies the documented Device Association requirements. |
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
 | `ReadAssociation -Validate` | 2 | Optional (`-Online`: issuer JWKS, anonymous) | No; decodes and checks the `DeviceLinkJwtCompressed` token, optionally verifying its RS256 signature. |
-| `RemoveAssociation` | 4 | Microsoft identity and Graph | Deletes the local UEFI variables **and** the matching Intune record. |
-| `RemoveAssociation -KeepCloudAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
+| `RemoveAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
+| `RemoveAssociation -DeleteCloudAssociation` | 4 | Microsoft identity and Graph | Resolves the cloud record, removes UEFI, sends one Graph DELETE and verifies the result. |
 | `RemoveAssociation -DeleteCloudAssociation` | 4 | Microsoft identity and Graph | Resolves the cloud record, removes UEFI, sends one Graph DELETE and verifies the cloud result. |
 
 `Action` defaults to `Full`. For safety, choose the action explicitly in scripts and administrative procedures.
@@ -344,7 +344,7 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-DevicePreparationPolicyId` | Exact Device Preparation policy ID for import. | None |
 | `-PolicyName` | Exact Device Preparation policy name to resolve. | None |
 | `-FirstPolicy` | Selects the first applicable policy returned by Graph. | Disabled |
-| `-KeepCloudAssociation` | With `RemoveAssociation`: clear UEFI only and leave the Intune record. Alias `-LocalOnly`. | Disabled (the record is removed) |
+| `-DeleteCloudAssociation` | With `RemoveAssociation`: after verified local removal, also delete the matched Intune record. | Disabled |
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
 | `-Validate` | With `ReadAssociation`: decode and check the `DeviceLinkJwtCompressed` token (structure, `iat`/`exp` window, `linkId`/tenant/device-binding claims). Add `-Online` to verify its RS256 signature against the issuer's published key. | Disabled |
 | `-ShowClaims` | With `-Validate`: also print the decoded JOSE header and payload claims to the console (never to the diagnostic files). | Disabled |

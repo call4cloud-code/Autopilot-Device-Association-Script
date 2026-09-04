@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.8.2**
+**Current version: 1.9.0**
 
 Short version for PowerShell Gallery visitors: [GALLERY.md](../GALLERY.md)
 
@@ -13,7 +13,7 @@ The technical background and complete 12-step flow are explained in the Patch My
 **[Windows Autopilot Device Association: the complete 12-step flow](https://patchmypc.com/blog/windows-autopilot-device-association/)**
 
 > [!IMPORTANT]
-> This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change. Test it before using it in an operational workflow. Removing an association changes UEFI state and, by default, also deletes the Intune Device Association record.
+> This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and Microsoft Graph beta endpoints that can change. Test it before using it in an operational workflow. Removing an association changes UEFI state and, with the explicit online switch, deletes an Intune Device Association record.
 
 ## Contents
 
@@ -390,8 +390,8 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `ReadAssociation` | 1 | No | No; reads metadata about known UEFI variables. |
 | `ReadAssociation -Validate` | 2 | No (offline) | No; also decodes and checks the `DeviceLinkJwtCompressed` token. |
 | `ReadAssociation -Validate -Online` | 2 | Issuer metadata / JWKS (anonymous) | No; adds RS256 signature verification of the token. |
-| `RemoveAssociation` | 4 | Microsoft identity and Graph | Deletes the local UEFI variables **and** the matching Intune record. |
-| `RemoveAssociation -KeepCloudAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
+| `RemoveAssociation` | 1 | No | Deletes and verifies only the known local UEFI variables. |
+| `RemoveAssociation -DeleteCloudAssociation` | 4 | Microsoft identity and Graph | Resolves the cloud record, removes UEFI, sends one Graph DELETE and verifies the result. |
 
 
 `Action` defaults to `Full`. For safety, choose the action explicitly in scripts and administrative procedures.
@@ -418,8 +418,9 @@ Every action prints its plan before starting and reports progress as `[STEP curr
 | `-DevicePreparationPolicyId` | Exact Device Preparation policy ID for import. | First returned applicable policy when neither ID nor name is supplied |
 | `-PolicyName` | Exact Device Preparation policy name to resolve. | None |
 | `-FirstPolicy` | Explicitly selects the first applicable policy returned by Graph. Retained for compatibility because this is now the default. | Disabled |
-| `-KeepCloudAssociation` | With `RemoveAssociation`: clear the local UEFI variables only and leave the Intune record in place. Alias `-LocalOnly`. | Disabled (the record is removed) |
-| `-DeleteCloudAssociation` | Retained for compatibility. Cloud removal is now the default, so this switch changes nothing. | Disabled |
+| `-DeleteCloudAssociation` | With `RemoveAssociation`: after verified local removal, also delete the matched Intune Device Association record. | Disabled |
+| `-KeepCloudAssociation` | Accepted for compatibility with 1.7.0-1.8.2. Local-only removal is the default again, so this changes nothing. Alias `-LocalOnly`. | Disabled |
+
 | `-TenantAssociatedDeviceId` | Optional exact Device Association record GUID. The record must still match the local serial number or SMBIOS UUID. | Automatic matching |
 | `-Force` | Continue even when the requirements preflight reports that the device does not qualify. Without it, an interactive session is asked to confirm and a non-interactive session stops. | Disabled |
 | `-Validate` | With `ReadAssociation`: decode `DeviceLinkJwtCompressed` and check it is a well-formed RS256 JWT, inside its `iat`/`exp` window, with a `linkId` matching the `DeviceLinkId` UEFI variable and (with `-TenantId`) a matching tenant and device inventory. Add `-Online` to also verify the RS256 signature against the issuer's published key. Reports booleans, timestamps and the signing-key thumbprint only. | Disabled |
@@ -513,7 +514,7 @@ Local removal does not clear the TPM, unenroll the device, delete the Intune man
 
 ## Removing the Intune Device Association record
 
-`RemoveAssociation` removes the Intune Device Association record as well as the local UEFI variables. Add `-KeepCloudAssociation` (alias `-LocalOnly`) to clear UEFI only. `-DeleteCloudAssociation` is still accepted and now describes the default.
+`-DeleteCloudAssociation` extends `RemoveAssociation` with an explicit online path. Without it, only the local UEFI variables are cleared.
 
 ```mermaid
 flowchart TD
@@ -717,6 +718,12 @@ No real Graph mutation, UEFI deletion, TPM change, Intune deletion or Entra dele
 The package also contains exact pre-change script snapshots for comparison and rollback.
 
 ## Version history
+
+### 1.9.0
+
+- Deleting the Intune Device Association record is **opt-in again**. `RemoveAssociation` clears the local UEFI variables only; add `-DeleteCloudAssociation` to also delete the matching Intune record. This reverts the 1.7.0 default.
+- `-KeepCloudAssociation` and its `-LocalOnly` alias are still accepted so commands written against 1.7.0 to 1.8.2 keep working, but they now describe the default and change nothing. Supplying both switches is still rejected.
+- Because cloud removal is opt-in again, `RemoveAssociation` no longer signs in to Microsoft Graph unless you ask it to.
 
 ### 1.8.2
 
