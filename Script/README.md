@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.9.0**
+**Current version: 1.9.1**
 
 Short version for PowerShell Gallery visitors: [GALLERY.md](../GALLERY.md)
 
@@ -718,6 +718,10 @@ No real Graph mutation, UEFI deletion, TPM change, Intune deletion or Entra dele
 The package also contains exact pre-change script snapshots for comparison and rollback.
 
 ## Version history
+
+### 1.9.1
+
+- Shortened the package description to fit the PowerShell Gallery 4000-character limit. The Gallery measures the raw `.DESCRIPTION` help block **including its indentation**, so a description that `Test-ScriptFileInfo` reports as 3860 characters was really 4135 bytes on the wire. The deep hanging indents in the action list were the expensive part.
 
 ### 1.9.0
 

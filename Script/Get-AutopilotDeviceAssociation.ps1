@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.9.0
+.VERSION 1.9.1
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.9.1 shortens the package description so it fits the PowerShell Gallery limit. The Gallery measures the raw help block including its indentation, which was 4135 bytes even though Test-ScriptFileInfo reported 3860 characters.
 Version 1.9.0 makes deleting the Intune Device Association record opt-in again. RemoveAssociation clears the local UEFI variables only; add -DeleteCloudAssociation to also delete the matching Intune record. This reverts the 1.7.0 default. -KeepCloudAssociation and its -LocalOnly alias are still accepted so commands written against 1.7.0 to 1.8.2 keep working, but they now describe the default and change nothing.
 Version 1.8.2 drops the 'TPM supports the association key' requirement check. It scanned the Crypto-NCrypt log for DEVICEASSOCIATION_TACK_RSA failures and blocked the run, but NTE_NOT_SUPPORTED against that key probe turns out to be common enough that the check produced false failures on devices that are otherwise fine. The 0x80090029 hint on a real association failure is kept.
 Version 1.8.1 states that the TPM 2.0 requirement is met by a discrete, firmware or Microsoft Pluton TPM, and CheckRequirements now names which implementation the device has.
@@ -36,68 +37,53 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
       Full     - Export + Inspect + Upload + wait until preassociated + Link
 
 .DESCRIPTION
-    One command for the whole Windows Autopilot device association lifecycle. Classic
-    Autopilot has Get-WindowsAutopilotInfo; device association did not have an
-    equivalent, so associating a device meant a hidden OOBE page, a USB stick, a
-    three-minute export timeout and a round trip to the Intune portal, per device.
+    One command for the whole Windows Autopilot device association lifecycle.
+    Classic Autopilot has Get-WindowsAutopilotInfo; device association did not have
+    an equivalent, so associating a device meant a hidden OOBE page, a USB stick and
+    a round trip to the Intune portal, per device.
 
-    Run it with no parameters and it does the whole pipeline: asks Windows for the
-    genuine TPM-backed DeviceLink identity package (WinRT DeviceLinkUtilities),
-    inspects it, imports the unchanged Data value into Intune through the Microsoft
-    Graph beta importTenantAssociatedDevice endpoint, waits for the record to reach
-    pre-associated, runs the native Windows discovery and link calls that write the
-    tenant-signed association into UEFI, and finally confirms the service reports the
-    device as associated rather than assuming it.
+    Run it with no parameters and it does the lot: asks Windows for the genuine
+    TPM-backed DeviceLink identity package (WinRT DeviceLinkUtilities), inspects it,
+    imports the unchanged Data value into Intune through the Microsoft Graph beta
+    importTenantAssociatedDevice endpoint, waits for pre-association, runs the native
+    discovery and link calls that write the tenant-signed association into UEFI, then
+    confirms the service reports the device as associated rather than assuming it.
 
-    ACTIONS
+    CheckRequirements verifies Microsoft's documented requirements against this
+    machine first: a physical device (virtual machines are not supported), 64-bit
+    Windows 11 client on a supported build (24H2 26100.9278 or 25H2 26200.9278,
+    KB5120998 or later) and edition, a TPM 2.0 - discrete, firmware or Microsoft
+    Pluton - enabled and not in Reduced Functionality Mode, UEFI firmware and Secure
+    Boot. Add -Online to test the required Microsoft endpoints. The device-side
+    actions run the same check and ask before continuing when the device does not
+    qualify; -Force skips the prompt.
 
-      CheckRequirements  Verifies Microsoft's documented requirements against this
-                         machine before you start: a physical device (virtual machines
-                         are not supported), 64-bit Windows 11 client on a supported
-                         build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or
-                         later) and edition, a TPM 2.0 - discrete, firmware, or
-                         Microsoft Pluton - that is enabled and not in Reduced
-                         Functionality Mode, UEFI firmware and Secure Boot.
-                         Add -Online to test the required Microsoft endpoints.
+    ReadAssociation reports the Device Link UEFI markers by status, size and SHA-256
+    without returning their contents. Associations expire, so present is not the same
+    as valid: -Validate decodes the token and checks it is a well-formed RS256 JWT,
+    inside its validity window, with a linkId matching the DeviceLinkId UEFI variable
+    and tenant and device claims matching this machine. -Online verifies the
+    signature against the issuer's published key.
 
-      Full               Export, inspect, import, wait, link, confirm. The default.
-                         Export, Inspect, Upload, Sync, Discover and Link also run on
-                         their own.
+    RemoveAssociation reads every known variable before deleting anything, deletes
+    only what is present and verifies afterwards. Add -DeleteCloudAssociation to also
+    delete the matching Intune record, which must match this computer exactly and
+    uniquely and is deleted only after local removal is verified. It does not
+    unenroll the device or clear the TPM.
 
-      ReadAssociation    Reports the Device Link UEFI markers by status, size and
-                         SHA-256 without returning their contents. Add -Validate to
-                         decode the association token and check it is a well-formed
-                         RS256 JWT, still inside its validity window, with a linkId
-                         matching the DeviceLinkId UEFI variable and tenant and device
-                         claims matching this machine; associations expire, so present
-                         is not the same as valid. Add -Online to verify the signature
-                         against the issuer's published key.
-
-      RemoveAssociation  Clears the local UEFI variables. Add -DeleteCloudAssociation to
-                         also delete the matching Intune record. It reads every known
-                         variable before deleting
-                         anything, deletes only what is present and verifies
-                         afterwards. The Intune record must match this computer exactly
-                         and uniquely, and is deleted only after local removal is
-                         verified. Add -DeleteCloudAssociation to also delete the Intune
-                         record. It
-                         does not unenroll the device or clear the TPM.
-
-    The device-side actions run the requirements check first and ask before continuing
-    when the device does not qualify; -Force skips the prompt. Exit codes are 0 for
-    success, 1 for an error and 2 when the device does not meet the requirements, so
-    CheckRequirements works as a gate in a task sequence.
+    Export, Inspect, Upload, Sync, Discover and Link also run on their own. Exit
+    codes are 0 success, 1 error, 2 requirements not met, so CheckRequirements works
+    as a gate in a task sequence.
 
     The exported Data value is uploaded exactly as Windows produced it: the script
     never fabricates, edits or re-signs an identity, and HTTP mutations have zero
-    automatic retries. Graph actions use Microsoft device-code sign-in by default, with
-    certificate or client-secret app-only authentication for unattended runs. Every run
-    writes a redacted diagnostic folder with one artifact per REST call, safe to attach
-    to a support case.
+    automatic retries. Graph actions use Microsoft device-code sign-in by default,
+    with certificate or client-secret app-only authentication for unattended runs.
+    Every run writes a redacted diagnostic folder with one artifact per REST call.
 
-    This is a diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and
-    Microsoft Graph beta endpoints that can change, and removal changes UEFI state.
-    Test it before using it in an operational workflow.
+    A diagnostic and lab toolkit. It calls Windows DeviceLink interfaces and Graph
+    beta endpoints that can change, and removal changes UEFI state. Test it before
+    using it in an operational workflow.
 .NOTES
     Exit codes: 0 = success, 1 = error, 2 = the device does not meet the documented requirements.
 
@@ -188,7 +174,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.9.0'
+$DL_SCRIPT_VERSION = '1.9.1'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
