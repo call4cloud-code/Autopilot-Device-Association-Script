@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.8.1
+.VERSION 1.8.2
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.8.2 drops the 'TPM supports the association key' requirement check. It scanned the Crypto-NCrypt log for DEVICEASSOCIATION_TACK_RSA failures and blocked the run, but NTE_NOT_SUPPORTED against that key probe turns out to be common enough that the check produced false failures on devices that are otherwise fine. The 0x80090029 hint on a real association failure is kept.
 Version 1.8.1 states that the TPM 2.0 requirement is met by a discrete, firmware or Microsoft Pluton TPM, and CheckRequirements now names which implementation the device has.
 Version 1.8.0 gives the script meaningful exit codes - 0 success, 1 error, 2 the device does not meet the requirements - so CheckRequirements and a preflight stop no longer report success to a caller. Full also gains a sixth step that polls Intune until the record reports associated, so a successful client-side link is confirmed against the service instead of being assumed.
 Version 1.7.0 makes RemoveAssociation remove the Intune Device Association record as well as the local UEFI variables by default. Use -KeepCloudAssociation (alias -LocalOnly) to clear UEFI only. -DeleteCloudAssociation is still accepted and is now a no-op, because it describes the default. The safety rules are unchanged: the cloud record must match this computer exactly and uniquely, and it is deleted only after local UEFI removal has been verified.
@@ -55,9 +56,8 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
                          build (24H2 26100.9278 or 25H2 26200.9278, KB5120998 or
                          later) and edition, a TPM 2.0 - discrete, firmware, or
                          Microsoft Pluton - that is enabled and not in Reduced
-                         Functionality Mode, UEFI firmware and Secure Boot, and whether
-                         the TPM has been refusing to create the key device association
-                         needs. Add -Online to test the required Microsoft endpoints.
+                         Functionality Mode, UEFI firmware and Secure Boot.
+                         Add -Online to test the required Microsoft endpoints.
 
       Full               Export, inspect, import, wait, link, confirm. The default.
                          Export, Inspect, Upload, Sync, Discover and Link also run on
@@ -185,7 +185,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.8.1'
+$DL_SCRIPT_VERSION = '1.8.2'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -1782,6 +1782,7 @@ function Invoke-DLValidateAssociationToken {
         if ($payload.deviceManufacturer) { $manuMatch   = [string]::Equals(([string]$cs.Manufacturer).Trim(),([string]$payload.deviceManufacturer).Trim(),[StringComparison]::OrdinalIgnoreCase) }
         if ($payload.deviceModel)        { $modelMatch  = [string]::Equals(([string]$cs.Model).Trim(),([string]$payload.deviceModel).Trim(),[StringComparison]::OrdinalIgnoreCase) }
     } catch {}
+
     $issuerHost = $null; $issuerIsMicrosoft = $null
     if ($payload.iss) {
         try {
@@ -2042,19 +2043,6 @@ function Test-DLDeviceRequirements {
         $sbText  = if ($sb) { 'Secure Boot is on' } else { 'Secure Boot is off. TPM attestation generally expects it to be enabled.' }
         $results.Add((New-DLCheck 'Secure Boot' $sbState $sbText))
     } catch {}
-    # ---- can the TPM actually create the Device Association key? ----------
-    try {
-        $since = (Get-Date).AddHours(-24)
-        $tack = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Crypto-NCrypt/Operational'; StartTime = $since } -ErrorAction Stop |
-                  Where-Object { $_.Message -match 'DEVICEASSOCIATION_TACK' -and $_.Message -match '0x80090029' })
-        if ($tack.Count) {
-            $results.Add((New-DLCheck 'TPM supports the association key' 'Fail' ('The TPM refused to create DEVICEASSOCIATION_TACK_RSA with NTE_NOT_SUPPORTED (0x80090029) {0} time(s) in the last 24 hours. This is a TPM firmware capability problem; check for an OEM TPM firmware update.' -f $tack.Count)))
-        } else {
-            $results.Add((New-DLCheck 'TPM supports the association key' 'Pass' 'No NTE_NOT_SUPPORTED failures against DEVICEASSOCIATION_TACK_RSA in the last 24 hours'))
-        }
-    } catch {
-        $results.Add((New-DLCheck 'TPM supports the association key' 'Unknown' 'The Crypto-NCrypt operational log could not be read (an elevated session is usually required).'))
-    }
 
     # ---- endpoints (opt-in, network) -------------------------------------
     if ($IncludeEndpoints) {

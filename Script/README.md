@@ -2,7 +2,7 @@
 
 `Get-AutopilotDeviceAssociation.ps1` is a PowerShell toolkit for exporting, inspecting, importing, applying, reading and removing a Windows Autopilot Device Association.
 
-**Current version: 1.8.1**
+**Current version: 1.8.2**
 
 Short version for PowerShell Gallery visitors: [GALLERY.md](../GALLERY.md)
 
@@ -718,6 +718,16 @@ The package also contains exact pre-change script snapshots for comparison and r
 
 ## Version history
 
+### 1.8.2
+
+- Removed the `TPM supports the association key` requirement check. It scanned the Crypto-NCrypt log for `DEVICEASSOCIATION_TACK_RSA` failures and blocked the run, but `NTE_NOT_SUPPORTED` against that key probe turns out to be common enough that it produced false failures on devices that are otherwise healthy.
+- The `0x80090029` explanation is kept where it belongs: on an actual association failure, not as a gate before one.
+
+### 1.8.1
+
+- The TPM 2.0 requirement is met by a discrete, firmware or **Microsoft Pluton** TPM, and `CheckRequirements` now names which implementation the device has.
+- Fixed a garbled sentence in the PowerShell Gallery description.
+
 ### 1.8.0
 
 - **Meaningful exit codes**: `0` success, `1` error, `2` the device does not meet the requirements. `CheckRequirements` and a preflight stop previously both returned `0`, so a caller could not tell a qualifying device from one that cannot associate at all.
@@ -746,7 +756,7 @@ The package also contains exact pre-change script snapshots for comparison and r
 ### 1.5.0
 
 - Added `-Action CheckRequirements`, which verifies the [documented Device Association requirements](https://learn.microsoft.com/autopilot/device-preparation/device-association/requirements) against the local machine.
-- Checks: physical device (virtual machines are not supported), 64-bit Windows 11 client, a supported build (24H2 `26100.9278` or 25H2 `26200.9278`, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, Secure Boot, and whether the TPM has recently refused to create the `DEVICEASSOCIATION_TACK_RSA` key.
+- Checks: physical device (virtual machines are not supported), 64-bit Windows 11 client, a supported build (24H2 `26100.9278` or 25H2 `26200.9278`, KB5120998 or later), a supported edition, TPM 2.0 enabled and not in Reduced Functionality Mode, UEFI firmware, Secure Boot.
 - `-Online` additionally tests TCP 443 to `ztd.dds.microsoft.com` and the thirteen `attest.azure.net` endpoints.
 - A Windows build newer than the documented releases is reported as a warning, not a failure: it already supersedes KB5120998, so it is treated as untested rather than unsupported. New releases are added by editing the `$DL_REQ_BUILDS` table.
 - Checks that need elevation report `Unknown` rather than a false failure, and the report says so.
