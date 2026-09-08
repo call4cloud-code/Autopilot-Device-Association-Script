@@ -1,5 +1,5 @@
 ﻿<#PSScriptInfo
-.VERSION 1.8.1
+.VERSION 1.9.0
 .GUID f21910f3-6fff-442b-9d35-5731d01e5af8
 .AUTHOR Rudy Ooms
 .COMPANYNAME Patch My PC
@@ -7,6 +7,7 @@
 .TAGS Windows Autopilot Intune DeviceAssociation DeviceLink Autopilot-Device-Preparation OOBE
 .PROJECTURI https://patchmypc.com/blog/windows-autopilot-device-association/
 .RELEASENOTES
+Version 1.9.0 makes the requirements preflight a hard stop. When the documented Device Association requirements are not met, Export, Sync, Discover, Link and Full now stop before touching the device with exit code 2 and print how to override, instead of asking "Continue anyway?" with a Yes default that let a run proceed into an opaque native failure. -Force is now the single override and still runs anyway. [Mattias Melkersen]
 Version 1.8.1 states that the TPM 2.0 requirement is met by a discrete, firmware or Microsoft Pluton TPM, and CheckRequirements now names which implementation the device has.
 Version 1.8.0 gives the script meaningful exit codes - 0 success, 1 error, 2 the device does not meet the requirements - so CheckRequirements and a preflight stop no longer report success to a caller. Full also gains a sixth step that polls Intune until the record reports associated, so a successful client-side link is confirmed against the service instead of being assumed.
 Version 1.7.0 makes RemoveAssociation remove the Intune Device Association record as well as the local UEFI variables by default. Use -KeepCloudAssociation (alias -LocalOnly) to clear UEFI only. -DeleteCloudAssociation is still accepted and is now a no-op, because it describes the default. The safety rules are unchanged: the cloud record must match this computer exactly and uniquely, and it is deleted only after local UEFI removal has been verified.
@@ -55,8 +56,8 @@ Version 1.2.0 keeps the normal console concise, moves diagnostic events to -Verb
                            UEFI firmware and Secure Boot, and whether the TPM has been
                            refusing to create the Device Association key. Add -Online to
                            test the required Microsoft endpoints. The device-side actions
-                           run the same check first and ask before continuing when the
-                           device does not qualify.
+                           run the same check first and stop when the device does not
+                           qualify, unless -Force is supplied.
 
       ReadAssociation    - reports the known Device Link UEFI markers by status, size and
                            SHA-256 without returning their contents. Add -Validate to
@@ -172,7 +173,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$DL_SCRIPT_VERSION = '1.8.1'
+$DL_SCRIPT_VERSION = '1.9.0'
 $DL_DEFAULT_PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $DL_DEFAULT_AUTHORITY_TENANT = 'organizations'
 $APDP_TEMPLATE_ID = '70d256b3-6120-4f88-9e00-0972ec64fc83_1'
@@ -2143,8 +2144,6 @@ function Invoke-DLRequirementsPreflight {
         Supported = $false
         Failures  = @($report.Failures | Select-Object Check, Detail)
     }
-    $detail = ($report.Failures | ForEach-Object { "  - $($_.Check): $($_.Detail)" }) -join [Environment]::NewLine
-
     if ($Force) {
         Write-Host ''
         Write-Warning "This device does not meet the documented Device Association requirements ($($report.Summary)):"
@@ -2155,28 +2154,13 @@ function Invoke-DLRequirementsPreflight {
         return $true
     }
 
-    # Ask, putting the detail in the prompt itself so it is not printed twice.
-    # ShouldContinue throws on a host that cannot prompt, which is treated as "no".
-    $continue = $false
-    $prompted = $true
-    try {
-        $continue = $PSCmdlet.ShouldContinue(
-            ($detail + [Environment]::NewLine + [Environment]::NewLine + 'The operation is very likely to fail. Continue anyway?'),
-            "Windows Autopilot Device Association requirements are not met ($($report.Summary))")
-    } catch {
-        $continue = $false
-        $prompted = $false
-    }
-
-    if ($continue) {
-        Write-DLLog 'RequirementsPreflight' 'Requirements are not met; the operator chose to continue.' `
-            ($logData + @{ Continued = $true; Reason = 'Operator confirmed' }) 'WARN'
-        return $true
-    }
-
+    # Requirements are not met and -Force was not supplied: stop before touching the
+    # device. Continuing only runs headlong into an opaque native failure, so there is
+    # no "Continue anyway?" prompt - -Force is the single, deliberate override, and
+    # Write-DLStopBanner shows how to use it.
     Write-DLStopBanner $report
     Write-DLLog 'RunStoppedByPreflight' 'Stopped before touching the device because the documented requirements are not met.' `
-        ($logData + @{ Continued = $false; Prompted = $prompted }) 'WARN' -NoHost
+        ($logData + @{ Continued = $false }) 'WARN' -NoHost
     $script:DLStoppedByPreflight = $true
     $script:DLExitCode = 2
     return $false
@@ -2186,6 +2170,7 @@ function Invoke-DLRequirementsPreflight {
 function Get-DLNativeErrorHint([string]$Message) {
     $hints = [ordered]@{
         '0x80004001' = 'E_NOTIMPL: this Windows build does not expose the DeviceLink API. Device Association requires Windows 11 24H2 or 25H2 with KB5120998 or later. Run -Action CheckRequirements.'
+        '0x80040154' = 'REGDB_E_CLASSNOTREG: the ModernDeployment.Autopilot.Core.DeviceLinkUtilities runtime class is not registered on this build. Device Association requires Windows 11 24H2 or 25H2 with KB5120998 or later. Run -Action CheckRequirements.'
         '0x8103C00F' = 'Windows could not obtain the attestation material needed to complete the association. Check that the TPM is healthy and its firmware is current, and that the attest.azure.net endpoints are reachable. Run -Action CheckRequirements.'
         '0x80070005' = 'Access denied. Run in an elevated 64-bit PowerShell session.'
         '0x80090029' = 'NTE_NOT_SUPPORTED: the TPM refused to create the key Device Association requires. This is usually a TPM firmware capability problem; check for an OEM TPM firmware update.'
